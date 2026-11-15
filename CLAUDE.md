@@ -2,7 +2,8 @@
 
 A deliberately calm, unexciting full-screen "work" app for a toddler (GNOME on
 Wayland, Python + GTK4). Keys and taps write out a pretend report; a greyscale
-picture of the word being written and the latest letter ("Hh") sit to the right.
+picture of the word being written (word printed underneath) and the latest
+letter ("Hh") sit to the right.
 Tapping the picture or the letter speaks it. Exit: Ctrl+Alt+Shift+P+I.
 
 ## UK English only — no Americanisms
@@ -17,7 +18,7 @@ preference: importing American language and culture by default is unwelcome.
   band-aid), biscuit (not cookie), sweeties (not candy), nappy, pushchair,
   holiday, pavement, "brum brum" (not "vroom").
 - Letters are spoken "aitch" and "zed"; 0 is "nought". Voice is a British
-  Piper voice (en_GB-cori-high).
+  Kokoro voice (bf_emma), letters fed as exact phonemes.
 - No American cultural staples (monster trucks, school buses, Halloween
   trick-or-treat, etc.). Prefer British things: milk floats, bin lorries,
   red post boxes, steam trains, rock pools.
@@ -37,7 +38,7 @@ beyond a progress bar and faint tap ripples. The goal is that he feels he is
 - `reports/*.md` — one report per file: `# Title`, blank line, story text.
 - `icons.py` — word → emoji (drawn greyscale). Plurals are matched automatically.
 - `speech.py` — letter names and playback; `make_voices.py` records
-  `sounds/` with Piper (`tts/`, not committed). Re-run after adding icon words.
+  `sounds/` with Kokoro TTS (`tts/`, not committed). Re-run after adding icon words.
 - `run.sh` / `~/.local/bin/toddler` — launcher; always restores settings after.
 
 ## Testing

@@ -370,7 +370,16 @@ class Desk(Gtk.Widget):
         self.icon_rect = (cx, py, card, card)
         snap.append_color(_rgba(PAPER), _rect(*self.icon_rect))
         if self.icon:
-            self._draw_icon(snap, self.icon[1], cx, py, card)
+            # picture in the upper part, its word underneath
+            self._draw_icon(snap, self.icon[1], cx + card * 0.1, py + card * 0.02, card * 0.8)
+            lay = self.create_pango_layout(self.icon[0])
+            lay.set_font_description(Pango.FontDescription.from_string(f"Sans {max(10, int(card * 0.075))}"))
+            _, ext = lay.get_pixel_extents()
+            snap.save()
+            snap.translate(Graphene.Point().init(cx + (card - ext.width) / 2 - ext.x,
+                                                 py + card * 0.86 - ext.height / 2 - ext.y))
+            snap.append_layout(lay, _rgba(INK))
+            snap.restore()
         ly = py + card + ph * 0.06
         lh = ph - card - ph * 0.06
         self.letter_rect = (cx, ly, card, lh)

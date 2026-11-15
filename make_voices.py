@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Record every letter and picture word with Piper TTS (British voice).
+"""Record every letter, digit and picture word with Kokoro TTS (British voice).
 
-Usage: python3 make_voices.py [--voice en_GB-cori-high] [--force]
-Downloads Piper and the voice into tts/ if they aren't there yet.
+Usage: python3 make_voices.py [--voice bf_emma] [--force]
+
+First run sets everything up inside tts/ (nothing system-wide): the `uv`
+package manager, a Python 3.12 venv with kokoro-onnx, and the Kokoro model.
+Only missing recordings are made unless --force is given.
 """
 
 import os
@@ -11,55 +14,89 @@ import sys
 import tarfile
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from icons import ICONS  # noqa: E402
-from speech import LETTER_NAMES, SOUNDS  # noqa: E402
-
 HERE = os.path.dirname(os.path.abspath(__file__))
-TTS = os.path.join(HERE, "tts", "dl")
-PIPER_URL = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz"
-VOICE_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB"
-
-# Words the voice reads oddly, spelled the way they should sound.
-SPOKEN = {"tyre": "tire"}
-
-
-def ensure(voice):
-    os.makedirs(TTS, exist_ok=True)
-    piper = os.path.join(TTS, "piper", "piper")
-    if not os.path.exists(piper):
-        tgz = os.path.join(TTS, "piper.tar.gz")
-        urllib.request.urlretrieve(PIPER_URL, tgz)
-        with tarfile.open(tgz) as t:
-            t.extractall(TTS, filter="tar")
-    model = os.path.join(TTS, voice + ".onnx")
-    if not os.path.exists(model):
-        _, name, quality = voice.split("-")
-        for ext in (".onnx", ".onnx.json"):
-            urllib.request.urlretrieve(f"{VOICE_BASE}/{name}/{quality}/{voice}{ext}", model[:-5] + ext)
-    return piper, model
+TTS = os.path.join(HERE, "tts")
+VENV_PY = os.path.join(TTS, "venv", "bin", "python")
+MODEL_DIR = os.path.join(TTS, "kokoro")
+UV_URL = "https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz"
+MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+MODEL_FILES = ["kokoro-v1.0.onnx", "voices-v1.0.bin"]
+DEFAULT_VOICE = "bf_emma"  # British female; others: bf_isabella, bm_george, bm_lewis
 
 
-def main():
-    voice = "en_GB-cori-high"
-    if "--voice" in sys.argv:
-        voice = sys.argv[sys.argv.index("--voice") + 1]
-    force = "--force" in sys.argv
-    piper, model = ensure(voice)
-    jobs = [("letters", ch, text) for ch, text in LETTER_NAMES.items()]
-    jobs += [("words", w, SPOKEN.get(w, w)) for w in ICONS]
+def setup():
+    """Create tts/venv with kokoro-onnx and fetch the model, if missing."""
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    env = dict(os.environ, UV_PYTHON_INSTALL_DIR=os.path.join(TTS, "python"),
+               UV_CACHE_DIR=os.path.join(TTS, "uv-cache"))
+    uv = os.path.join(TTS, "uv")
+    if not os.path.exists(VENV_PY):
+        if not os.path.exists(uv):
+            tgz = os.path.join(TTS, "uv.tar.gz")
+            urllib.request.urlretrieve(UV_URL, tgz)
+            with tarfile.open(tgz) as t:
+                member = t.getmember("uv-x86_64-unknown-linux-gnu/uv")
+                member.name = "uv"
+                t.extract(member, TTS, filter="tar")
+            os.remove(tgz)
+        subprocess.run([uv, "venv", "-q", "--python", "3.12", os.path.join(TTS, "venv")],
+                       env=env, check=True)
+        subprocess.run([uv, "pip", "install", "-q", "kokoro-onnx", "soundfile"],
+                       env=dict(env, VIRTUAL_ENV=os.path.join(TTS, "venv")), check=True)
+    for f in MODEL_FILES:
+        path = os.path.join(MODEL_DIR, f)
+        if not os.path.exists(path):
+            print(f"downloading {f} ...")
+            urllib.request.urlretrieve(MODEL_URL + f, path)
+
+
+def record(voice, force):
+    import numpy as np
+    import soundfile as sf
+    from kokoro_onnx import Kokoro
+
+    sys.path.insert(0, HERE)
+    from icons import ICONS
+    from speech import LETTER_NAMES, SOUNDS
+
+    k = Kokoro(*(os.path.join(MODEL_DIR, f) for f in MODEL_FILES))
+
+    # Letters go in as exact phonemes. Spellings like "eff" get misread as
+    # abbreviations ("E-F-F"), but a lone capital gives the proper British
+    # letter name. Check the two that differ from American.
+    def phonemes(text):
+        return k.tokenizer.phonemize(text, "en-gb").strip()
+    assert "eɪtʃ" in phonemes("H") and "zˈɛd" in phonemes("Z"), "not British letter names"
+
+    jobs = []
+    for ch, spoken in LETTER_NAMES.items():
+        jobs.append(("letters", ch, phonemes(ch.upper() if ch.isalpha() else spoken)))
+    for word in ICONS:
+        jobs.append(("words", word, phonemes(word.capitalize() + ".")))
+
     made = 0
-    for folder, name, text in jobs:
+    for folder, name, ph in jobs:
         out = os.path.join(SOUNDS, folder, name + ".wav")
         if os.path.exists(out) and not force:
             continue
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        subprocess.run([piper, "-m", model, "-f", out, "--length_scale", "1.15",
-                        "--sentence_silence", "0.1"],
-                       input=text + ".", text=True, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        samples, rate = k.create(ph, voice=voice, speed=0.9, is_phonemes=True)
+        # trim silence, keep a short tail so it doesn't sound clipped
+        loud = np.where(np.abs(samples) > 0.01)[0]
+        if len(loud):
+            samples = samples[max(0, loud[0] - int(0.02 * rate)):loud[-1] + int(0.12 * rate)]
+        sf.write(out, samples, rate)
         made += 1
     print(f"{made} recordings made with {voice}; {len(jobs)} total in {SOUNDS}")
+
+
+def main():
+    voice = sys.argv[sys.argv.index("--voice") + 1] if "--voice" in sys.argv else DEFAULT_VOICE
+    force = "--force" in sys.argv
+    if os.path.realpath(sys.executable) != os.path.realpath(VENV_PY):
+        setup()  # then re-run ourselves inside the venv
+        os.execv(VENV_PY, [VENV_PY, os.path.abspath(__file__)] + sys.argv[1:])
+    record(voice, force)
 
 
 if __name__ == "__main__":

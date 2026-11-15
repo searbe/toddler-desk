@@ -1,7 +1,7 @@
 """Pre-recorded British English speech for letters and picture words.
 
 Recordings live in sounds/letters/<char>.wav and sounds/words/<word>.wav and
-are made once by make_voices.py (Piper TTS, British voice). If a recording is
+are made once by make_voices.py (Kokoro TTS, British voice). If a recording is
 missing, nothing is played.
 """
 
@@ -12,7 +12,8 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOUNDS = os.path.join(HERE, "sounds")
 
-# How each character is said (British letter names: "aitch", "zed").
+# Digits are recorded from these words; letters from the capital letter itself
+# (which gives British names: "aitch", "zed").
 LETTER_NAMES = {
     "a": "ay", "b": "bee", "c": "see", "d": "dee", "e": "ee", "f": "eff",
     "g": "jee", "h": "aitch", "i": "eye", "j": "jay", "k": "kay", "l": "ell",
