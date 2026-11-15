@@ -80,6 +80,8 @@ SINGLE_KEYS = [
     ("org.gnome.desktop.interface", "enable-hot-corners", GLib.Variant("b", False)),
     ("org.gnome.desktop.notifications", "show-banners", GLib.Variant("b", False)),
     ("org.gnome.desktop.a11y.keyboard", "enable", GLib.Variant("b", False)),  # 5x Shift popups
+    # Otherwise the touchpad ignores taps while a key is held down.
+    ("org.gnome.desktop.peripherals.touchpad", "disable-while-typing", GLib.Variant("b", False)),
     ("org.gnome.shell.extensions.dash-to-dock", "hot-keys", GLib.Variant("b", False)),
 ]
 
@@ -232,12 +234,18 @@ def load_reports():
 
 
 # Muted palette - deliberately unexciting.
-BG = (0.17, 0.19, 0.21)
-PAPER = (0.86, 0.85, 0.82)
-INK = (0.25, 0.27, 0.30)
-DIM = (0.55, 0.58, 0.61)
-BAR_BG = (0.26, 0.29, 0.32)
-BAR_FG = (0.45, 0.53, 0.60)
+# Warm off-white, like a screen with f.lux on: low blue, nothing pure white.
+BG = (0.89, 0.85, 0.77)
+PAPER = (0.97, 0.94, 0.87)
+INK = (0.29, 0.25, 0.21)
+DIM = (0.55, 0.49, 0.42)
+BAR_BG = (0.83, 0.78, 0.69)
+BAR_FG = (0.64, 0.56, 0.45)
+WAITING = (0.92, 0.86, 0.74)  # the rest of a tapped sentence, before it's read
+READING = (0.86, 0.75, 0.56)  # the word being said now
+RIPPLE = (0.45, 0.39, 0.32)
+# Pictures are drawn in a warm greyscale (sepia-ish) to match.
+WARM = (1.0, 0.93, 0.80)
 
 
 def _rgba(c, a=1.0):
@@ -268,6 +276,9 @@ class Desk(Gtk.Widget):
         self.letter = ""  # most recent letter, shown as "Hh"
         self.icon_rect = self.letter_rect = None
         self.prompt = None  # (X, Y) while the "close?" line is showing
+        self.text_box = None  # (layout, x, y, clip rect) of the written text, for taps
+        self.reading = None  # see read_from()
+        self.read_id = 0
         GLib.timeout_add(50, self.tick)
 
     def _next_report(self):
@@ -275,6 +286,7 @@ class Desk(Gtk.Widget):
             self.queue = random.sample(self.reports, len(self.reports))
         self.title, self.story = self.queue.pop()
         self.text = ""
+        self.reading = None
         self.progress = 0.0
         # Until a picture word is being written, show the title's picture.
         self.icon = next(filter(None, map(icon_for, reversed(self.title.split()))), None)
@@ -336,13 +348,115 @@ class Desk(Gtk.Widget):
         self.ripples.append((x, y, time.monotonic()))
         if self._inside(self.icon_rect, x, y):
             if self.icon:
+                self.reading = None
                 speech.say_word(self.icon[0])
         elif self._inside(self.letter_rect, x, y):
             if self.letter:
+                self.reading = None
                 speech.say_letter(self.letter)
-        else:
+        elif not self.read_from(x, y):
             self._write_more()
         self.queue_draw()
+
+    # -- reading the writing aloud -------------------------------------------
+    def _word_at(self, x, y):
+        """(start, end) of the fully written word under (x, y), or None."""
+        if not self.text_box:
+            return None
+        layout, ox, oy, clip = self.text_box
+        if not self._inside(clip, x, y):
+            return None
+        inside, byte, _ = layout.xy_to_index(int((x - ox) * Pango.SCALE), int((y - oy) * Pango.SCALE))
+        if not inside:
+            return None
+        i = len(layout.get_text().encode()[:byte].decode(errors="ignore"))
+        t = self.text
+        if i >= len(t) or t[i].isspace():
+            return None
+        a = i
+        while a > 0 and not t[a - 1].isspace():
+            a -= 1
+        b = i
+        while b < len(t) and not t[b].isspace():
+            b += 1
+        if b == len(t) and b < len(self.story) and not self.story[b].isspace():
+            return None  # still being written
+        return a, b
+
+    def read_from(self, x, y):
+        """Tap on a word: read from there to the end of its sentence."""
+        word = self._word_at(x, y)
+        if not word:
+            return False
+        a = word[0]
+        end = len(self.text)
+        for i in range(word[1] - 1, len(self.text)):
+            if self.text[i] in ".!?" and (i + 1 == len(self.text) or self.text[i + 1].isspace()):
+                end = i + 1
+                break
+        else:  # sentence not finished yet: read the whole words written so far
+            while end > a and end < len(self.story) and not self.story[end].isspace():
+                end -= 1
+        ranges, i = [], a
+        while i < end:
+            if self.text[i].isspace():
+                i += 1
+                continue
+            j = i
+            while j < end and not self.text[j].isspace():
+                j += 1
+            ranges.append((i, j))
+            i = j
+        self.read_id += 1
+        self.reading = {"id": self.read_id, "ranges": ranges, "asked": time.monotonic(),
+                        "starts": None, "t0": 0.0, "end": 0.0}
+        speech.read(self.read_id, self.text[a:end])
+        return True
+
+    def on_voice(self, line):
+        """A line from the voice process."""
+        kind, _, rest = line.partition(" ")
+        rid, _, data = rest.partition(" ")
+        r = self.reading
+        if not r or str(r["id"]) != rid:
+            return
+        if kind == "reading":
+            times, _, dur = data.partition(";")
+            r["starts"] = [float(v) for v in times.split(",")]
+            r["end"] = float(dur or 0) or r["starts"][-1] + 0.6
+            r["t0"] = time.monotonic()
+        else:  # couldn't read it
+            self.reading = None
+        self.queue_draw()
+
+    def _reading_now(self):
+        """(word ranges to tint as waiting, range being said) for drawing."""
+        r = self.reading
+        if not r:
+            return [], None
+        now = time.monotonic()
+        if r["starts"] is None:
+            if now - r["asked"] > 15:  # the voice never answered
+                self.reading = None
+                return [], None
+            return r["ranges"][1:], r["ranges"][0]  # tapped word lit at once
+        t = now - r["t0"]
+        if t > r["end"]:
+            self.reading = None
+            return [], None
+        k = max((i for i, st in enumerate(r["starts"]) if st <= t), default=0)
+        k = min(k, len(r["ranges"]) - 1)
+        return r["ranges"][k + 1:], r["ranges"][k]
+
+    def _shade(self, snap, layout, ox, oy, rng, color):
+        text = layout.get_text()
+        pad = 2
+        for i in range(*rng):
+            byte = len(text[:i].encode())
+            pos = layout.index_to_pos(byte)
+            x, y = ox + pos.x / Pango.SCALE, oy + pos.y / Pango.SCALE
+            w, h = pos.width / Pango.SCALE, pos.height / Pango.SCALE
+            snap.append_color(_rgba(color), _rect(x - pad, y, w + 2 * pad, h))
 
     def tick(self):
         now = time.monotonic()
@@ -375,8 +489,8 @@ class Desk(Gtk.Widget):
         _, ext = lay.get_pixel_extents()
         m = Graphene.Matrix()
         # rows = input channel; every output colour gets the same luminance
-        m.init_from_float([0.30, 0.30, 0.30, 0, 0.59, 0.59, 0.59, 0,
-                           0.11, 0.11, 0.11, 0, 0, 0, 0, 1])
+        m.init_from_float([v * w for v in (0.30, 0.59, 0.11) for w in WARM + (0,)][:12]
+                          + [0, 0, 0, 1])
         snap.push_color_matrix(m, Graphene.Vec4().init(0, 0, 0, 0))
         snap.save()
         snap.translate(Graphene.Point().init(x + (size - ext.width) / 2 - ext.x,
@@ -408,9 +522,17 @@ class Desk(Gtk.Widget):
         _, logical = layout.get_pixel_extents()
         avail = ph - 2 * pad
         offset = max(0, logical.height - avail)
-        snap.push_clip(_rect(px, py + pad, pw, avail))
+        clip = (px, py + pad, pw, avail)
+        ox, oy = px + pad, py + pad - offset
+        self.text_box = (layout, ox, oy, clip)
+        snap.push_clip(_rect(*clip))
+        waiting, current = self._reading_now()
+        for rng in waiting:
+            self._shade(snap, layout, ox, oy, rng, WAITING)
+        if current:
+            self._shade(snap, layout, ox, oy, current, READING)
         snap.save()
-        snap.translate(Graphene.Point().init(px + pad, py + pad - offset))
+        snap.translate(Graphene.Point().init(ox, oy))
         snap.append_layout(layout, _rgba(INK))
         snap.restore()
         snap.pop()
@@ -468,7 +590,7 @@ class Desk(Gtk.Widget):
             r = 8 + 30 * t
             rr = Gsk.RoundedRect()
             rr.init_from_rect(_rect(x - r, y - r, 2 * r, 2 * r), r)
-            c = _rgba((0.8, 0.8, 0.8), 0.35 * (1 - t))
+            c = _rgba(RIPPLE, 0.3 * (1 - t))
             snap.append_border(rr, [2, 2, 2, 2], [c, c, c, c])
 
         if self.prompt:
@@ -519,6 +641,7 @@ class ToddlerDesk(Gtk.Application):
         win.set_cursor(Gdk.Cursor.new_from_name("default", None))
         self.desk = Desk()
         win.set_child(self.desk)
+        speech.on_line(self.desk.on_voice)
 
         keys = Gtk.EventControllerKey()
         keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)

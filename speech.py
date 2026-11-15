@@ -7,10 +7,27 @@ extra Python packages. If the voice isn't set up, the app is simply silent.
 import os
 import subprocess
 
+from gi.repository import GLib
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 VENV_PY = os.path.join(HERE, "tts", "venv", "bin", "python")
 
 _proc = None
+_listeners = []
+
+
+def on_line(callback):
+    """Call callback(line) for each line the voice prints (e.g. "reading ...")."""
+    _listeners.append(callback)
+
+
+def _readable(stream, cond):
+    line = stream.readline() if cond & GLib.IOCondition.IN else ""
+    if not line:
+        return False  # voice has gone
+    for cb in _listeners:
+        cb(line.strip())
+    return True
 
 
 def start():
@@ -20,8 +37,10 @@ def start():
         return
     try:
         _proc = subprocess.Popen([VENV_PY, os.path.join(HERE, "voice.py"), "--serve"],
-                                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        GLib.io_add_watch(_proc.stdout, GLib.PRIORITY_DEFAULT,
+                          GLib.IOCondition.IN | GLib.IOCondition.HUP, _readable)
     except OSError:
         _proc = None
 
@@ -43,6 +62,15 @@ def say_letter(ch):
 
 def say_word(word):
     _send(f"say word {word.lower()}")
+
+
+def read(read_id, text):
+    """Read a stretch of the report aloud; the voice answers "reading <id> ..."."""
+    if not _proc or _proc.poll() is not None:
+        for cb in _listeners:  # no voice: let the highlight go straight away
+            cb(f"noread {read_id}")
+        return
+    _send(f"read {read_id} " + " ".join(text.split()))
 
 
 def prepare_word(word):
