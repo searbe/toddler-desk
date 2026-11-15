@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 import numpy as np
 import soundfile as sf
@@ -58,6 +59,7 @@ TIMED_MODEL = os.path.join(MODEL_DIR, "kokoro-v1.0-timed.onnx")
 # model run gets its own RunOptions; when a tap arrives during a background
 # run, the reader thread sets its terminate flag, the run stops within
 # milliseconds, the tap is answered, and the background job is redone later.
+THREADS = max(1, min(3, (os.cpu_count() or 2) // 2 - 1 or 1))
 _running = [None]  # (RunOptions, is_background) of the model run in progress
 _in_background = threading.Event()
 _aborted = threading.Event()
@@ -68,7 +70,14 @@ def kokoro():
     if _k is None:
         import onnxruntime as rt
         model = TIMED_MODEL if os.path.exists(TIMED_MODEL) else os.path.join(MODEL_DIR, "kokoro-v1.0.onnx")
-        _k = Kokoro(model, os.path.join(MODEL_DIR, "voices-v1.0.bin"))
+        # 3 threads: on this 4-core laptop 4 threads was fastest (2.4 s a clip),
+        # 8 was slower (2.7-4.1 s, hyper-threads fighting) and pegged every
+        # core, so the screen got sluggish; 3 (2.7 s) leaves a core free.
+        opts = rt.SessionOptions()
+        opts.intra_op_num_threads = THREADS
+        opts.inter_op_num_threads = 1
+        _k = Kokoro.from_session(rt.InferenceSession(model, opts, providers=["CPUExecutionProvider"]),
+                                 os.path.join(MODEL_DIR, "voices-v1.0.bin"))
         plain_run = _k.sess.run
 
         def run(output_names, input_feed, run_options=None):
@@ -100,7 +109,7 @@ def in_background(fn, *args):
     except Exception as e:
         if _aborted.is_set():
             return False
-        print(f"error: {e}", file=sys.stderr, flush=True)
+        vlog(f"ERROR: {e!r}")
         return True
     finally:
         _in_background.clear()
@@ -452,6 +461,7 @@ def clip(kind, text):
     if not os.path.exists(path):
         os.makedirs(CACHE, exist_ok=True)
         s, r = synth(kind, text)
+        _made[0] += 1
         sf.write(path + ".tmp.wav", s, r)
         os.replace(path + ".tmp.wav", path)
     return path
@@ -467,6 +477,7 @@ def sentence_clip(text):
     if not (os.path.exists(path) and os.path.exists(meta)):
         os.makedirs(CACHE, exist_ok=True)
         s, r, starts = synth_sentence(text)
+        _made[0] += 1
         with open(meta + ".tmp", "w") as f:
             json.dump(starts, f)
         sf.write(path + ".tmp.wav", s, r)
@@ -496,8 +507,19 @@ def play(path):
     global _player
     if _player and _player.poll() is None:
         _player.terminate()  # newest tap wins
-    _player = subprocess.Popen(["pw-play", path], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+        try:
+            _player.wait(timeout=1)  # reap it, so stopped players don't pile up
+        except subprocess.TimeoutExpired:
+            _player.kill()
+    _player = subprocess.Popen([os.environ.get("TODDLER_PLAYER", "pw-play"), path],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def vlog(msg):
+    """One line in the shared log (stderr goes to toddler.log via the app)."""
+    t = time.time()
+    print(time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t * 1000) % 1000:03d} voice: {msg}",
+          file=sys.stderr, flush=True)
 
 
 def serve():
@@ -514,55 +536,97 @@ def serve():
         for line in sys.stdin:
             if line.startswith(("say ", "read ")):
                 abort_background()  # a tap: answer it now
-            requests.put(line)
+            requests.put((time.monotonic(), line.strip()))
         requests.put(None)  # stdin closed: the app has gone
 
     threading.Thread(target=reader, daemon=True).start()
     todo = [item for item in LETTERS
             if not os.path.exists(os.path.join(CACHE, f"{item[0]}-{item[1]}.wav"))]
-    if todo:
-        kokoro()
+    t0 = time.monotonic()
+    kokoro()
+    vlog(f"started: model loaded in {time.monotonic() - t0:.1f} s, {THREADS} threads, "
+         f"{'timed' if kokoro().has_timings else 'untimed'} model, {len(todo)} letters to make, "
+         f"cache {CACHE}")
     print("ready", flush=True)
-    pending = []  # requests not handled yet, oldest first
+    pending = []  # (time received, request) not handled yet, oldest first
+    wanted = []  # the last two sentences asked for: being written, and next
     while True:
         try:  # wait for work only when there's nothing else to do
-            line = requests.get(timeout=0 if (todo or pending) else None)
-            if line is None:
+            item = requests.get(timeout=0 if (todo or pending) else None)
+            if item is None:
                 break
-            pending.append(line.strip())
+            pending.append(item)
             while not requests.empty():  # take everything that has arrived
-                line = requests.get()
-                if line is None:
+                item = requests.get()
+                if item is None:
                     return
-                pending.append(line.strip())
+                pending.append(item)
         except queue.Empty:
             pass
-        # Taps first, newest tap wins; then picture words; then letters.
-        taps = [p for p in pending if p.startswith(("say ", "read "))]
+        # Taps first, newest tap wins; then picture words and sentences; then letters.
+        taps = [p for p in pending if p[1].startswith(("say ", "read "))]
         if taps:
             job = taps[-1]
             for old in taps[:-1]:
-                if old.startswith("read "):
-                    print(f"noread {old.split()[1]}", flush=True)
+                vlog(f"skipped {old[1][:60]!r}: a newer tap came")
+                if old[1].startswith("read "):
+                    print(f"noread {old[1].split()[1]}", flush=True)
             pending = [p for p in pending if p not in taps]
         elif pending:
-            job = pending.pop(0)
-            pending = [p for p in pending if p != job]  # same thing asked twice
-            if job.startswith("prep sentence "):
+            # New sentences first (they say what's wanted now), then picture
+            # words (one clip each), then sentence clips.
+            job = next((p for p in pending if p[1].startswith("prep sentence ")), None) \
+                or next((p for p in pending if p[1].startswith("prep word ")), None) or pending[0]
+            pending = [p for p in pending if p[1] != job[1]]  # incl. same thing asked twice
+            if job[1].startswith("prep sentence "):
                 # One clip per word position, each its own job so taps get in
-                # between; the sentence asked for first is made first.
-                words = job[len("prep sentence "):].split()
-                pending[:0] = ["prep clip " + " ".join(words[k:]) for k in range(len(words))]
+                # between. Only the two latest sentences matter: when he types
+                # faster than clips are made, clips for sentences he has moved
+                # past are dropped instead of piling up.
+                sentence = job[1][len("prep sentence "):]
+                wanted = (wanted + [sentence])[-2:]
+                words = sentence.split()
+                stale = [p for p in pending if p[1].startswith("prep clip ") and not any(
+                    w == p[1][10:] or w.endswith(" " + p[1][10:]) for w in wanted)]
+                pending = [p for p in pending if p not in stale]
+                pending += [(job[0], "prep clip " + " ".join(words[k:])) for k in range(len(words))]
+                vlog(f"queued {len(words)} clips for {sentence[:50]!r}, dropped {len(stale)} "
+                     f"for older sentences; queue now {len(pending)}")
                 continue
         else:
-            if in_background(clip, *todo[0]):
-                todo.pop(0)
+            run_job((time.monotonic(), "letter " + todo[0][1]), lambda: clip(*todo[0]),
+                    background=True, queued=len(pending)) and todo.pop(0)
             continue
-        if job.startswith("prep "):
-            if not in_background(handle, job):
+        if job[1].startswith("prep "):
+            if not run_job(job, lambda: handle(job[1]), background=True, queued=len(pending)):
                 pending.insert(0, job)  # stopped for a tap: redo it next
             continue
-        handle(job)
+        run_job(job, lambda: handle(job[1]), background=False, queued=len(pending))
+
+
+_made = [0]  # clips actually made (not found in the cache)
+
+
+def run_job(job, fn, background, queued):
+    """Run one request and log how long it waited and took."""
+    received, line = job
+    start, made = time.monotonic(), _made[0]
+    done = in_background(fn) if background else (fn() or True)
+    took = time.monotonic() - start
+    how = ("STOPPED for a tap" if not done else
+           "made" if _made[0] > made else "from cache")
+    if took > 0.05 or not background:
+        vlog(f"{line[:70]!r}: waited {start - received:.2f} s, took {took:.2f} s, {how}; "
+             f"{queued} queued, rss {_rss_mb():.0f} MB")
+    return done
+
+
+def _rss_mb():
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1e6
+    except (OSError, ValueError):
+        return 0.0
 
 
 def handle(line):
@@ -574,7 +638,7 @@ def handle(line):
             play(path)
             print(f"reading {rid} " + ",".join(map(str, starts)) + f";{length:.3f}", flush=True)
         except Exception as e:
-            print(f"error: {e}", file=sys.stderr, flush=True)
+            vlog(f"ERROR: {e!r}")
             print(f"noread {rid}", flush=True)
         return
     if line.startswith("prep clip "):
@@ -590,7 +654,7 @@ def handle(line):
         path = clip(parts[1], parts[2])
         play(path)
     except Exception as e:  # never let a bad word kill the voice
-        print(f"error: {e}", file=sys.stderr, flush=True)
+        vlog(f"ERROR: {e!r}")
 
 
 def main():

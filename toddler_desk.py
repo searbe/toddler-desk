@@ -21,6 +21,7 @@ and puts every setting back on exit. If it ever dies uncleanly, run
 """
 
 import json
+import logging
 import os
 import random
 import re
@@ -55,6 +56,39 @@ STATE_DIR = os.path.join(
 )
 BACKUP_FILE = os.path.join(STATE_DIR, "settings-backup.json")
 PID_FILE = os.path.join(STATE_DIR, "pid")
+LOG_FILE = os.path.join(STATE_DIR, "toddler.log")  # the voice writes here too
+log = logging.getLogger("app")
+
+
+def setup_logging(test_mode):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    try:  # keep it small: one old copy
+        if os.path.getsize(LOG_FILE) > 5_000_000:
+            os.replace(LOG_FILE, LOG_FILE + ".1")
+    except OSError:
+        pass
+    h = logging.FileHandler(LOG_FILE)
+    h.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(name)s: %(message)s", "%H:%M:%S"))
+    logging.getLogger().addHandler(h)
+    logging.getLogger().setLevel(logging.INFO)
+    log.info("---- start%s, pid %d", " (test mode)" if test_mode else "", os.getpid())
+
+
+def _rss_mb(pid):
+    try:
+        with open(f"/proc/{pid}/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1e6
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _cpu_seconds(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return 0.0
 
 # A GNOME shortcut that quits the app even when its window has lost keyboard
 # focus (then the app's own key handler never sees the exit combo). While the
@@ -285,6 +319,8 @@ class Desk(Gtk.Widget):
         self.text_box = None  # (layout, x, y, clip rect) of the written text, for taps
         self.reading = None  # see read_from()
         self.read_id = 0
+        self.stats = {"frames": [], "tick_late": 0.0, "keys": 0, "taps": 0}
+        self.last_tick = time.monotonic()
         GLib.timeout_add(50, self.tick)
 
     def _next_report(self):
@@ -297,6 +333,7 @@ class Desk(Gtk.Widget):
         self.reading = None
         self.progress = 0.0
         self.sentences = _sentences(self.story)
+        log.info("report: %r, %d sentences, %d chars", self.title, len(self.sentences), len(self.story))
         self.prepped = {t for t in getattr(self, "prepped", ()) if t in self.story}
         self._prepare_sentences()
         # Until a picture word is being written, show the title's picture.
@@ -359,6 +396,7 @@ class Desk(Gtk.Widget):
 
     # -- input ---------------------------------------------------------------
     def key(self, keyval):
+        self.stats["keys"] += 1
         name = Gdk.keyval_name(keyval) or ""
         if name.endswith(("_L", "_R")):
             return  # bare modifiers do nothing
@@ -376,12 +414,15 @@ class Desk(Gtk.Widget):
     def click(self, x, y):
         self.last_input = time.monotonic()
         self.ripples.append((x, y, time.monotonic()))
+        self.stats["taps"] += 1
         if self._inside(self.icon_rect, x, y):
             if self.icon:
+                log.info("tap picture: %s", self.icon[0])
                 self.reading = None
                 speech.say_word(self.icon[0])
         elif self._inside(self.letter_rect, x, y):
             if self.letter:
+                log.info("tap letter: %s", self.letter)
                 self.reading = None
                 speech.say_letter(self.letter)
         elif not self.read_from(x, y):
@@ -427,6 +468,8 @@ class Desk(Gtk.Widget):
         words = [(sa + m.start(), sa + m.end()) for m in re.finditer(r"\S+", self.story[sa:sb])]
         first = next(i for i, w in enumerate(words) if w[0] == word[0])
         self.read_id += 1
+        log.info("tap word: read %d = %r", self.read_id,
+                 " ".join(self.story[a:b] for a, b in words[first:]))
         self.reading = {"id": self.read_id, "ranges": words[first:], "asked": time.monotonic(),
                         "starts": None, "t0": 0.0, "end": 0.0}
         speech.read(self.read_id, first, len(words), self.story[sa:sb])
@@ -437,6 +480,12 @@ class Desk(Gtk.Widget):
         kind, _, rest = line.partition(" ")
         rid, _, data = rest.partition(" ")
         r = self.reading
+        if kind in ("reading", "noread"):
+            if r and str(r["id"]) == rid:
+                log.info("read %s %s after %.2f s", rid, "started" if kind == "reading" else "FAILED",
+                         time.monotonic() - r["asked"])
+            else:
+                log.info("read %s answered (%s) but no longer wanted", rid, kind)
         if not r or str(r["id"]) != rid:
             return
         if kind == "reading":
@@ -486,6 +535,11 @@ class Desk(Gtk.Widget):
 
     def tick(self):
         now = time.monotonic()
+        late = now - self.last_tick - 0.05
+        self.stats["tick_late"] = max(self.stats["tick_late"], late)
+        if late > 0.25:
+            log.info("main loop stalled: tick %.0f ms late", late * 1000)
+        self.last_tick = now
         self.ripples = [r for r in self.ripples if now - r[2] < 0.7]
         if self.saved_until and now >= self.saved_until:
             self.saved_until = 0.0
@@ -526,6 +580,14 @@ class Desk(Gtk.Widget):
         snap.pop()
 
     def do_snapshot(self, snap):
+        t0 = time.monotonic()
+        self._snapshot(snap)
+        took = time.monotonic() - t0
+        self.stats["frames"].append(took)
+        if took > 0.05:
+            log.info("slow frame: %.0f ms (text %d chars)", took * 1000, len(self.text))
+
+    def _snapshot(self, snap):
         w, h = self.get_width(), self.get_height()
         now = time.monotonic()
         snap.append_color(_rgba(BG), _rect(0, 0, w, h))
@@ -668,6 +730,8 @@ class ToddlerDesk(Gtk.Application):
         self.desk = Desk()
         win.set_child(self.desk)
         speech.on_line(self.desk.on_voice)
+        self._cpu_prev = {}
+        GLib.timeout_add_seconds(60, self._log_stats)
 
         keys = Gtk.EventControllerKey()
         keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -757,6 +821,23 @@ class ToddlerDesk(Gtk.Application):
         ok, base, *_ = Gdk.Display.get_default().translate_key(keycode, 0, 0)
         return Gdk.keyval_to_lower(base if ok else keyval)
 
+    def _log_stats(self):
+        d = self.desk
+        st = d.stats
+        frames = st["frames"] or [0.0]
+        parts = [f"frames {len(st['frames'])}, draw avg {1000 * sum(frames) / len(frames):.1f} ms "
+                 f"max {1000 * max(frames):.0f} ms, tick late max {1000 * st['tick_late']:.0f} ms, "
+                 f"keys {st['keys']}, taps {st['taps']}, text {len(d.text)} chars"]
+        for name, pid in (("app", os.getpid()), ("voice", speech.pid())):
+            if pid:
+                cpu = _cpu_seconds(pid)
+                used = cpu - self._cpu_prev.get(name, cpu)
+                self._cpu_prev[name] = cpu
+                parts.append(f"{name} {_rss_mb(pid):.0f} MB, cpu {100 * used / 60:.0f}%")
+        log.info("stats: " + "; ".join(parts))
+        d.stats = {"frames": [], "tick_late": 0.0, "keys": 0, "taps": 0}
+        return True
+
     def on_click(self, _gesture, _n, x, y):
         if self.desk.prompt:
             self._dismiss_prompt()
@@ -764,6 +845,15 @@ class ToddlerDesk(Gtk.Application):
             self.desk.click(x, y)
 
     def on_key_pressed(self, _ctrl, keyval, keycode, state):
+        t0 = time.monotonic()
+        try:
+            return self._on_key_pressed(keyval, keycode, state)
+        finally:
+            took = time.monotonic() - t0
+            if took > 0.05:
+                log.info("slow key handler: %.0f ms", took * 1000)
+
+    def _on_key_pressed(self, keyval, keycode, state):
         repeat = keyval in self.held  # auto-repeat from a key held down
         self.held.add(keyval)
         k = self._base_key(keyval, keycode)
@@ -840,6 +930,7 @@ class ToddlerDesk(Gtk.Application):
     def quit_for_real(self):
         if self.allow_quit:
             return False
+        log.info("quitting")
         self.allow_quit = True
         self.shutdown_cleanup()
         self.quit()
@@ -864,6 +955,7 @@ def main():
         restore_settings()
         print("GNOME settings restored.")
         return 0
+    setup_logging("--test" in sys.argv)
     app = ToddlerDesk(test_mode="--test" in sys.argv)
     try:
         return app.run([sys.argv[0]])

@@ -87,6 +87,23 @@ work", not that the screen is fun.
   British female voices garble short words. Re-check with Whisper before
   switching voice (`./say --check --no-play word ...`).
 
+## Logs
+
+`~/.local/state/toddler-desk/toddler.log` (rolls over at 5 MB to `.1`). The app
+logs taps and how long the voice took to answer, new reports, slow frames
+and key handling, and a stats line every minute (draw time, main-loop lag,
+memory/CPU of app and voice). The voice logs every job: how long it waited
+and took, made vs cached vs stopped for a tap, and the queue length.
+
+## Voice workload
+
+Making a clip takes ~2.5 s, and a sentence needs one per word, so a fast
+typist outruns it. The voice only keeps clips for the two latest sentences
+asked for (being written, next) and drops the rest; picture words go before
+sentence clips; taps abort background work. The model runs on 3 threads:
+8 was slower on this 4-core laptop and made the whole machine sluggish.
+`TODDLER_PLAYER=true` runs the voice silently for tests.
+
 ## Testing
 
 `python3 toddler_desk.py --test` opens a 900×600 window for 3 s and changes no

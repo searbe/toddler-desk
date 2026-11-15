@@ -36,13 +36,20 @@ def start():
     if _proc or not os.path.exists(VENV_PY):
         return
     try:
+        state = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+        log = open(os.path.join(state, "toddler-desk", "toddler.log"), "a")  # shared with the app
         _proc = subprocess.Popen([VENV_PY, os.path.join(HERE, "voice.py"), "--serve"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                                 stderr=log, text=True, bufsize=1)
+        log.close()
         GLib.io_add_watch(_proc.stdout, GLib.PRIORITY_DEFAULT,
                           GLib.IOCondition.IN | GLib.IOCondition.HUP, _readable)
     except OSError:
         _proc = None
+
+
+def pid():
+    return _proc.pid if _proc and _proc.poll() is None else None
 
 
 def _send(line):
