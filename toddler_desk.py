@@ -291,11 +291,13 @@ class Desk(Gtk.Widget):
         if not self.queue:
             self.queue = random.sample(self.reports, len(self.reports))
         self.title, self.story = self.queue.pop()
+        if not self.queue:  # always know the next report, to prepare it early
+            self.queue = random.sample(self.reports, len(self.reports))
         self.text = ""
         self.reading = None
         self.progress = 0.0
         self.sentences = _sentences(self.story)
-        self.prepped = set()
+        self.prepped = {t for t in getattr(self, "prepped", ()) if t in self.story}
         self._prepare_sentences()
         # Until a picture word is being written, show the title's picture.
         self.icon = next(filter(None, map(icon_for, reversed(self.title.split()))), None)
@@ -313,15 +315,20 @@ class Desk(Gtk.Widget):
                 return
 
     def _prepare_sentences(self):
-        """Make the clips for the sentence being written and the next one, so a
-        tap on any word plays at once (cut from the whole sentence's clip)."""
+        """Make the clips for the sentence being written and the next one (on
+        the last sentence: the next report's first), so a tap on any word plays
+        at once. The voice makes one clip per word position."""
         n = len(self.text)
         for k, (a, b) in enumerate(self.sentences):
             if b > n:  # the sentence being written (none finished just now)
-                for a2, b2 in self.sentences[k:k + 2]:
-                    if (a2, b2) not in self.prepped:
-                        self.prepped.add((a2, b2))
-                        speech.prepare_sentence(self.story[a2:b2])
+                ahead = [self.story[a2:b2] for a2, b2 in self.sentences[k:k + 2]]
+                if len(ahead) < 2 and self.queue:
+                    nxt = self.queue[-1][1]
+                    ahead += [nxt[a2:b2] for a2, b2 in _sentences(nxt)[:1]]
+                for text in ahead:
+                    if text not in self.prepped:
+                        self.prepped.add(text)
+                        speech.prepare_sentence(text)
                 return
 
     def _write_more(self):
@@ -407,20 +414,22 @@ class Desk(Gtk.Widget):
         return a, b
 
     def read_from(self, x, y):
-        """Tap on a word: read from there to the end of its sentence (or to the
-        last whole word written, if the sentence isn't finished yet)."""
+        """Tap on a word: read from there to the end of its sentence.
+
+        The whole report is known, so a sentence still being written is read
+        to its end too, from the clip made ahead; words not on screen yet are
+        heard but have nothing to highlight (until they're typed).
+        """
         word = self._word_at(x, y)
         if not word:
             return False
         sa, sb = next(sp for sp in self.sentences if sp[0] <= word[0] < sp[1])
         words = [(sa + m.start(), sa + m.end()) for m in re.finditer(r"\S+", self.story[sa:sb])]
-        written = [w for w in words if w[1] <= len(self.text)
-                   and (w[1] == len(self.story) or self.story[w[1]].isspace())]
         first = next(i for i, w in enumerate(words) if w[0] == word[0])
         self.read_id += 1
-        self.reading = {"id": self.read_id, "ranges": written[first:], "asked": time.monotonic(),
+        self.reading = {"id": self.read_id, "ranges": words[first:], "asked": time.monotonic(),
                         "starts": None, "t0": 0.0, "end": 0.0}
-        speech.read(self.read_id, first, len(written), self.story[sa:sb])
+        speech.read(self.read_id, first, len(words), self.story[sa:sb])
         return True
 
     def on_voice(self, line):
@@ -440,7 +449,14 @@ class Desk(Gtk.Widget):
         self.queue_draw()
 
     def _reading_now(self):
-        """(word ranges to tint as waiting, range being said) for drawing."""
+        """(word ranges to tint as waiting, range being said) for drawing;
+        only the parts already written."""
+        n = len(self.text)
+        waiting, current = self._reading_ranges()
+        on_screen = lambda rng: rng and rng[0] < n and (rng[0], min(rng[1], n))  # noqa: E731
+        return [x for x in map(on_screen, waiting) if x], on_screen(current) or None
+
+    def _reading_ranges(self):
         r = self.reading
         if not r:
             return [], None

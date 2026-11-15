@@ -77,8 +77,10 @@ work", not that the screen is fun.
   with Whisper, it starts on the wrong word ~1 in 6 even with exact timings
   (words run together: "did it all", "caught a"). Instead every word position
   gets its own clip ("from this word to the end"), made while the sentence is
-  being written and the one after: one sentence ahead of the writing, never
-  the whole report up front.
+  being written and the one after (on the last sentence: the next report's
+  first): one sentence ahead of the writing, never the whole report up front.
+  A tap in the sentence being written reads the whole sentence too (the report
+  is known), highlighting only what's on screen - so no tap waits for a clip.
 - Sound words with no vowels ("Pssh", "Shh") are spelled out by the
   phonemiser, so `sentence_phonemes()` turns them into sounds.
 - Only `bm_lewis` survived Whisper checks across all 8 British voices; the
