@@ -64,13 +64,18 @@ def say_word(word):
     _send(f"say word {word.lower()}")
 
 
-def read(read_id, text):
-    """Read a stretch of the report aloud; the voice answers "reading <id> ..."."""
+def read(read_id, first, last, sentence):
+    """Say words first..last-1 of a sentence; the voice answers "reading <id> ..."."""
     if not _proc or _proc.poll() is not None:
         for cb in _listeners:  # no voice: let the highlight go straight away
             cb(f"noread {read_id}")
         return
-    _send(f"read {read_id} " + " ".join(text.split()))
+    _send(f"read {read_id} {first} {last} " + " ".join(sentence.split()))
+
+
+def prepare_sentence(sentence):
+    """Make a sentence's clip ahead of time so taps on its words play at once."""
+    _send("prep sentence " + " ".join(sentence.split()))
 
 
 def prepare_word(word):

@@ -23,6 +23,7 @@ and puts every setting back on exit. If it ever dies uncleanly, run
 import json
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -248,6 +249,11 @@ RIPPLE = (0.45, 0.39, 0.32)
 WARM = (1.0, 0.93, 0.80)
 
 
+def _sentences(story):
+    """(start, end) of each sentence in the story, end just after its . ! or ?"""
+    return [(m.start(), m.end()) for m in re.finditer(r"\S.*?(?:[.!?](?=\s|$)|$)", story)]
+
+
 def _rgba(c, a=1.0):
     v = Gdk.RGBA()
     v.red, v.green, v.blue, v.alpha = c[0], c[1], c[2], a
@@ -288,6 +294,9 @@ class Desk(Gtk.Widget):
         self.text = ""
         self.reading = None
         self.progress = 0.0
+        self.sentences = _sentences(self.story)
+        self.prepped = set()
+        self._prepare_sentences()
         # Until a picture word is being written, show the title's picture.
         self.icon = next(filter(None, map(icon_for, reversed(self.title.split()))), None)
         if self.icon:
@@ -301,6 +310,18 @@ class Desk(Gtk.Widget):
             found = icon_for(word)
             if found and found != self.icon:
                 speech.prepare_word(found[0])
+                return
+
+    def _prepare_sentences(self):
+        """Make the clips for the sentence being written and the next one, so a
+        tap on any word plays at once (cut from the whole sentence's clip)."""
+        n = len(self.text)
+        for k, (a, b) in enumerate(self.sentences):
+            if b > n:  # the sentence being written (none finished just now)
+                for a2, b2 in self.sentences[k:k + 2]:
+                    if (a2, b2) not in self.prepped:
+                        self.prepped.add((a2, b2))
+                        speech.prepare_sentence(self.story[a2:b2])
                 return
 
     def _write_more(self):
@@ -323,6 +344,8 @@ class Desk(Gtk.Widget):
             self._prepare_next_icon(end if end != -1 else len(self.story))
         if self.text[-1].isalnum():
             self.letter = self.text[-1]
+        if self.text[-1] in ".!?":
+            self._prepare_sentences()
         if n >= len(self.story):
             self.progress = 1.0
             self.saved_until = time.monotonic() + 2.5
@@ -384,33 +407,20 @@ class Desk(Gtk.Widget):
         return a, b
 
     def read_from(self, x, y):
-        """Tap on a word: read from there to the end of its sentence."""
+        """Tap on a word: read from there to the end of its sentence (or to the
+        last whole word written, if the sentence isn't finished yet)."""
         word = self._word_at(x, y)
         if not word:
             return False
-        a = word[0]
-        end = len(self.text)
-        for i in range(word[1] - 1, len(self.text)):
-            if self.text[i] in ".!?" and (i + 1 == len(self.text) or self.text[i + 1].isspace()):
-                end = i + 1
-                break
-        else:  # sentence not finished yet: read the whole words written so far
-            while end > a and end < len(self.story) and not self.story[end].isspace():
-                end -= 1
-        ranges, i = [], a
-        while i < end:
-            if self.text[i].isspace():
-                i += 1
-                continue
-            j = i
-            while j < end and not self.text[j].isspace():
-                j += 1
-            ranges.append((i, j))
-            i = j
+        sa, sb = next(sp for sp in self.sentences if sp[0] <= word[0] < sp[1])
+        words = [(sa + m.start(), sa + m.end()) for m in re.finditer(r"\S+", self.story[sa:sb])]
+        written = [w for w in words if w[1] <= len(self.text)
+                   and (w[1] == len(self.story) or self.story[w[1]].isspace())]
+        first = next(i for i, w in enumerate(words) if w[0] == word[0])
         self.read_id += 1
-        self.reading = {"id": self.read_id, "ranges": ranges, "asked": time.monotonic(),
+        self.reading = {"id": self.read_id, "ranges": written[first:], "asked": time.monotonic(),
                         "starts": None, "t0": 0.0, "end": 0.0}
-        speech.read(self.read_id, self.text[a:end])
+        speech.read(self.read_id, first, len(written), self.story[sa:sb])
         return True
 
     def on_voice(self, line):

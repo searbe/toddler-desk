@@ -3,7 +3,10 @@
 
 As a server (started by the app):  voice.py --serve
     reads lines from stdin:  "say word banana" | "say letter h" | "prep word banana"
-                             "read <id> I got the jack."  (a sentence, word by word)
+                             "prep sentence I got the jack and lifted it up."
+                             "read <id> <first> <last> I got the jack and lifted it up."
+                                 (say words first..last-1 of that sentence, e.g. "2 4" =
+                                  "the jack"; prep makes a clip from every word to the end)
     and for "read" prints:   "reading <id> <word starts in seconds, comma-separated>;<clip length>"
                              once playback starts, or "noread <id>" if it failed.
 For testing by hand:                ./say banana   |   ./say -l h   |   ./say --check [--no-play] fish
@@ -45,16 +48,81 @@ DIGITS = {"0": "nought", "1": "one", "2": "two", "3": "three", "4": "four",
 _k = None
 
 
+# setup_tts.py makes a copy of the model that also reports how long each
+# sound lasts ("duration"), which gives exact word timings for read-aloud.
+# With kokoro-onnx's extra pauses off, its audio is identical to the original.
+TIMED_MODEL = os.path.join(MODEL_DIR, "kokoro-v1.0-timed.onnx")
+
+
+# Background work (letters, clips made ahead) must never hold up a tap. Every
+# model run gets its own RunOptions; when a tap arrives during a background
+# run, the reader thread sets its terminate flag, the run stops within
+# milliseconds, the tap is answered, and the background job is redone later.
+_running = [None]  # (RunOptions, is_background) of the model run in progress
+_in_background = threading.Event()
+_aborted = threading.Event()
+
+
 def kokoro():
     global _k
     if _k is None:
-        _k = Kokoro(os.path.join(MODEL_DIR, "kokoro-v1.0.onnx"),
-                    os.path.join(MODEL_DIR, "voices-v1.0.bin"))
+        import onnxruntime as rt
+        model = TIMED_MODEL if os.path.exists(TIMED_MODEL) else os.path.join(MODEL_DIR, "kokoro-v1.0.onnx")
+        _k = Kokoro(model, os.path.join(MODEL_DIR, "voices-v1.0.bin"))
+        plain_run = _k.sess.run
+
+        def run(output_names, input_feed, run_options=None):
+            opts = rt.RunOptions()
+            _running[0] = (opts, _in_background.is_set())
+            try:
+                return plain_run(output_names, input_feed, opts)
+            finally:
+                _running[0] = None
+        _k.sess.run = run
     return _k
+
+
+def abort_background():
+    """Stop the background model run in progress, if any (called on a tap)."""
+    cur = _running[0]
+    if cur and cur[1]:
+        _aborted.set()
+        cur[0].terminate = True
+
+
+def in_background(fn, *args):
+    """Run fn as background work. False if a tap stopped it (do it again later)."""
+    _aborted.clear()
+    _in_background.set()
+    try:
+        fn(*args)
+        return True
+    except Exception as e:
+        if _aborted.is_set():
+            return False
+        print(f"error: {e}", file=sys.stderr, flush=True)
+        return True
+    finally:
+        _in_background.clear()
+
+
+def _create(ph):
+    """(samples, rate, timing of each phoneme, or None without the timed model)."""
+    k = kokoro()
+    if k.has_timings:
+        return k.create_timed(ph, voice=VOICE, speed=SPEED, is_phonemes=True,
+                              sentence_pause=0, clause_pause=0)
+    s, r = k.create(ph, voice=VOICE, speed=SPEED, is_phonemes=True)
+    return s, r, None
 
 
 def phonemes(text):
     return kokoro().tokenizer.phonemize(text, "en-gb").strip()
+
+
+def _trim_start(s, r):
+    loud = np.where(np.abs(s) > 0.01)[0]
+    return max(0, loud[0] - int(0.02 * r)) if len(loud) else 0
 
 
 def _trim(s, r):
@@ -62,7 +130,7 @@ def _trim(s, r):
     loud = np.where(np.abs(s) > 0.01)[0]
     if not len(loud):
         return s
-    s = s[max(0, loud[0] - int(0.02 * r)):loud[-1] + int(0.12 * r)]
+    s = s[_trim_start(s, r):loud[-1] + int(0.12 * r)]
     rms = np.sqrt(np.mean(s ** 2)) or 1.0
     gain = min(0.12 / rms, 0.9 / (np.max(np.abs(s)) or 1.0))  # target level, never clip
     return (s * gain).astype(np.float32)
@@ -165,7 +233,6 @@ def _quiet_spans(s, r, min_ms=40):
 def synth(kind, text):
     """Return (samples, rate) for a letter/digit, a word or a sentence."""
     global _lead_len
-    k = kokoro()
     if kind == "sentence":
         ph = sentence_phonemes(text)
     elif kind == "letter":
@@ -174,10 +241,10 @@ def synth(kind, text):
         ph = phonemes(text.capitalize() + ".")
     lead = phonemes(LEAD)
     if _lead_len is None:
-        ls, _ = k.create(lead, voice=VOICE, speed=SPEED, is_phonemes=True)
+        ls, _, _ = _create(lead)
         a, b = _speech(ls)
         _lead_len = b - a
-    s, r = k.create(lead + " " + ph, voice=VOICE, speed=SPEED, is_phonemes=True)
+    s, r, _ = _create(lead + " " + ph)
     start, _ = _speech(s)
     if kind == "sentence":
         # Cut in the long pause after the lead-in. (Cutting nearest the expected
@@ -192,6 +259,128 @@ def synth(kind, text):
     gaps = [g for g in _quiet_gaps(s, r) if g > start + 0.6 * _lead_len]
     cut = min(gaps, key=lambda g: abs(g - expected)) if gaps else expected
     return _trim(s[cut:], r), r
+
+
+def _word_phonemes(word):
+    core = re.sub(r"[^A-Za-z']", "", word)
+    if _is_sound(core):
+        return _sound_phonemes(core)
+    return phonemes(re.sub(r"([A-Za-z])\1{2,}", r"\1\1", word))
+
+
+_SKIP = set("ˈˌ .,!?;:-—'\"")
+
+
+def _align_words(words, tim, r):
+    """Start (in samples) of each written word, from per-phoneme timings.
+
+    In a sentence the phonemiser runs short words together ("was the" ->
+    "wʌzðə") and reduces vowels, so each word's own phonemes are matched to the
+    sentence's phonemes; a word with nothing matched gets a start between its
+    neighbours.
+    """
+    import difflib
+    k_chars = [(t.phoneme, i) for i, t in enumerate(tim) if t.phoneme not in _SKIP]
+    w_str, w_pos = "", []
+    for w in words:
+        w_pos.append(len(w_str))
+        w_str += "".join(c for c in _word_phonemes(w) if c not in _SKIP)
+    w_pos.append(len(w_str))
+    sm = difflib.SequenceMatcher(None, "".join(c for c, _ in k_chars), w_str, autojunk=False)
+    w_to_k = {}
+    for a, b, n in sm.get_matching_blocks():
+        for d in range(n):
+            w_to_k[b + d] = a + d
+    starts = []
+    for i in range(len(words)):
+        k = next((w_to_k[j] - (j - w_pos[i]) for j in range(w_pos[i], w_pos[i + 1]) if j in w_to_k), None)
+        if k is not None and 0 <= k < len(k_chars):
+            starts.append(_cut_before(tim, k_chars[k][1], r))
+        else:
+            starts.append(None)
+    # fill gaps between known neighbours, then keep them in order
+    known = [i for i, st in enumerate(starts) if st is not None]
+    if not known:
+        return None
+    for i, st in enumerate(starts):
+        if st is None:
+            before = max((j for j in known if j < i), default=None)
+            after = min((j for j in known if j > i), default=None)
+            if before is None:
+                x = starts[after][0]
+            elif after is None:
+                x = starts[before][1] + int(0.15 * r) * (i - before)
+            else:
+                b0, a0 = starts[before][1], starts[after][0]
+                x = b0 + (a0 - b0) * (i - before) // (after - before)
+            starts[i] = (x, x)
+    return starts  # (lo, hi): cut somewhere in here, before the word's sound
+
+
+# Kokoro's audio runs ahead of its own frame timings by a few frames (its
+# reference join_timestamps subtracts 3 frames, 75 ms). 50 ms scored best when
+# cutting at word starts was checked with Whisper; it's used for the highlight.
+TIMING_SHIFT = 0.05
+
+
+def _cut_before(tim, ti, r):
+    """Where to cut so that the sound at tim[ti] (a word's first) starts the clip.
+
+    The sound starts before its own token: stress marks before it, and the
+    space token between words, carry the onset. So when the word follows a
+    space, cut at the start of that space (the quietest point inside it is
+    picked later, with the audio); words run together get a small margin.
+    """
+    i = ti
+    while i > 0 and tim[i - 1].phoneme in "ˈˌ":
+        i -= 1
+    at = lambda t: max(0, int((t - TIMING_SHIFT) * r))  # noqa: E731
+    if i > 0 and tim[i - 1].phoneme == " ":
+        return (at(tim[i - 1].start), at(tim[i].start))
+    return (at(tim[i].start - 0.04), at(tim[i].start))
+
+
+def synth_sentence(text):
+    """(samples, rate, start of each word in seconds) for a sentence.
+
+    Word starts come from the model's own durations when the timed model is
+    there; otherwise they are estimated (see word_starts), which is only good
+    enough for highlighting, not for cutting.
+    """
+    lead = phonemes(LEAD)
+    full = lead + " " + sentence_phonemes(text)
+    s, r, tim = _create(full)
+    words = text.split()
+    if tim:
+        skip = len(kokoro().tokenizer.known(lead + " "))
+        windows = _align_words(words, tim[skip:], r)
+        if windows:
+            cuts = []
+            for lo, hi in windows:
+                lo = max(lo, cuts[-1] + int(0.05 * r) if cuts else 0)
+                cuts.append(_quietest_in(s, r, lo, max(lo, hi)))
+            # The first cut also drops the lead-in: make it just before the end
+            # of the long pause after "Okay, next." when there is one (a cut
+            # from the timings alone clipped vowels: "a duck" -> "duck").
+            first_sound = int((tim[skip].start - TIMING_SHIFT) * r) if skip < len(tim) else cuts[0]
+            pauses = [(a, b) for a, b in _quiet_spans(s, r) if a < first_sound < b + int(0.1 * r)]
+            if pauses:
+                cuts[0] = max(pauses[-1][0], pauses[-1][1] - int(0.03 * r))
+            out = s[cuts[0]:]
+            off = cuts[0] + _trim_start(out, r)
+            return (_trim(out, r), r, [round(max(0.0, (c - off) / r), 3) for c in cuts])
+    s, r = synth("sentence", text)
+    return s, r, word_starts(text, s, r)
+
+
+def _quietest_in(s, r, lo, hi):
+    """Sample index of the quietest 5 ms in [lo, hi]."""
+    fr = int(r * 0.005)
+    hi = min(hi, len(s) - fr)
+    if hi <= lo:
+        return max(0, min(lo, len(s)))
+    return min(range(lo, hi + 1, max(1, fr // 2)),
+               key=lambda i: float(np.sqrt(np.mean(s[i:i + fr] ** 2))))
 
 
 # ------------------------------------------------------------ cache & playback
@@ -241,8 +430,12 @@ def _fingerprint():
     import inspect
     parts = [VOICE, str(SPEED), LEAD, repr(DIGITS)]
     parts += [inspect.getsource(f)
-              for f in (phonemes, _trim, _speech, _quiet_gaps, _quiet_spans, synth, word_starts,
-                        _is_sound, _sound_phonemes, sentence_phonemes)]
+              for f in (phonemes, _trim, _trim_start, _speech, _quiet_gaps, _quiet_spans, synth,
+                        word_starts, _is_sound, _sound_phonemes, sentence_phonemes, _create,
+                        _word_phonemes, _align_words, synth_sentence, _quietest_in,
+                        _cut_before)]
+    parts.append(str(TIMING_SHIFT))
+    parts.append(str(os.path.exists(TIMED_MODEL)))
     parts.append(repr(_SOUND) + repr(sorted(_NOT_SOUNDS)))  # sets print in random order
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:12]
 
@@ -273,14 +466,27 @@ def sentence_clip(text):
     meta = path[:-4] + ".json"
     if not (os.path.exists(path) and os.path.exists(meta)):
         os.makedirs(CACHE, exist_ok=True)
-        s, r = synth("sentence", text)
+        s, r, starts = synth_sentence(text)
         with open(meta + ".tmp", "w") as f:
-            json.dump(word_starts(text, s, r), f)
+            json.dump(starts, f)
         sf.write(path + ".tmp.wav", s, r)
         os.replace(meta + ".tmp", meta)
         os.replace(path + ".tmp.wav", path)
     with open(meta) as f:
         return path, json.load(f)
+
+
+def sentence_part(text, first, last):
+    """Words first..last-1 of a sentence: (path to play, word starts, length).
+
+    Each stretch is its own clip, made from exactly those words. Cutting one
+    whole-sentence clip at word boundaries was tried and checked with Whisper:
+    even with the model's own timings it started on the wrong word ~1 time in
+    6, because words run into each other ("did it all", "caught a"). So "prep
+    sentence" makes a clip for every word position instead (see serve()).
+    """
+    path, starts = sentence_clip(" ".join(text.split()[first:last]))
+    return path, starts, sf.info(path).duration
 
 
 LETTERS = [("letter", c) for c in "abcdefghijklmnopqrstuvwxyz0123456789"]
@@ -306,6 +512,8 @@ def serve():
 
     def reader():
         for line in sys.stdin:
+            if line.startswith(("say ", "read ")):
+                abort_background()  # a tap: answer it now
             requests.put(line)
         requests.put(None)  # stdin closed: the app has gone
 
@@ -339,32 +547,48 @@ def serve():
             pending = [p for p in pending if p not in taps]
         elif pending:
             job = pending.pop(0)
-            pending = [p for p in pending if p != job]  # same word asked twice
+            pending = [p for p in pending if p != job]  # same thing asked twice
+            if job.startswith("prep sentence "):
+                # One clip per word position, each its own job so taps get in
+                # between; the sentence asked for first is made first.
+                words = job[len("prep sentence "):].split()
+                pending[:0] = ["prep clip " + " ".join(words[k:]) for k in range(len(words))]
+                continue
         else:
-            clip(*todo.pop(0))
+            if in_background(clip, *todo[0]):
+                todo.pop(0)
+            continue
+        if job.startswith("prep "):
+            if not in_background(handle, job):
+                pending.insert(0, job)  # stopped for a tap: redo it next
             continue
         handle(job)
 
 
 def handle(line):
-    parts = line.split(maxsplit=2)
-    if parts[:1] == ["read"] and len(parts) == 3:
-        rid, text = parts[1], parts[2]
+    if line.startswith("read "):
+        parts = line.split(maxsplit=4)
+        rid = parts[1] if len(parts) > 1 else "?"
         try:
-            path, starts = sentence_clip(text)
+            path, starts, length = sentence_part(parts[4], int(parts[2]), int(parts[3]))
             play(path)
-            print(f"reading {rid} " + ",".join(map(str, starts))
-                  + f";{sf.info(path).duration:.3f}", flush=True)
+            print(f"reading {rid} " + ",".join(map(str, starts)) + f";{length:.3f}", flush=True)
         except Exception as e:
             print(f"error: {e}", file=sys.stderr, flush=True)
             print(f"noread {rid}", flush=True)
         return
+    if line.startswith("prep clip "):
+        sentence_clip(line[len("prep clip "):])  # errors handled by in_background
+        return
+    parts = line.split(maxsplit=2)
     if len(parts) != 3 or parts[0] not in ("say", "prep") or parts[1] not in ("word", "letter"):
+        return
+    if parts[0] == "prep":
+        clip(parts[1], parts[2])  # errors handled by in_background
         return
     try:
         path = clip(parts[1], parts[2])
-        if parts[0] == "say":
-            play(path)
+        play(path)
     except Exception as e:  # never let a bad word kill the voice
         print(f"error: {e}", file=sys.stderr, flush=True)
 

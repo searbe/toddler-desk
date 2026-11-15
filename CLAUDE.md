@@ -63,14 +63,24 @@ work", not that the screen is fun.
   says a lead-in phrase first and cuts at the pause; keep that.
 - Making a clip takes ~1.5 s, so clips are cached on disk in
   `~/.cache/toddler-desk/voice/<fingerprint>/`. Only letters/digits are made
-  in the background; the app asks for each picture word one word ahead (`prep`)
-  and sentences are made when tapped. Don't add an up-front fill of every word.
+  in the background; the app asks for each picture word one word ahead and
+  for sentence clips one sentence ahead (`prep`). Don't add an up-front fill.
   The fingerprint hashes `synth()` and the voice settings, so edits invalidate
   the cache automatically. Keep it deterministic (no `repr()` of sets): a
   changing fingerprint wipes the cache on every start.
-- Kokoro gives no word timings; `word_starts()` estimates them (≈0.15 s off,
-  checked against Whisper). Sound words with no vowels ("Pssh", "Shh") are
-  spelled out by the phonemiser, so `sentence_phonemes()` turns them into sounds.
+- Word timings come from the model itself: `setup_tts.py` makes
+  `tts/kokoro/kokoro-v1.0-timed.onnx`, a copy that also outputs each sound's
+  duration (needs the `onnx` package). With kokoro-onnx's extra pauses off
+  its audio is identical to the original model's. The timings drive the
+  reading highlight (shifted 50 ms earlier, see `TIMING_SHIFT`).
+- Don't cut one sentence clip at word boundaries to start mid-sentence: tested
+  with Whisper, it starts on the wrong word ~1 in 6 even with exact timings
+  (words run together: "did it all", "caught a"). Instead every word position
+  gets its own clip ("from this word to the end"), made while the sentence is
+  being written and the one after: one sentence ahead of the writing, never
+  the whole report up front.
+- Sound words with no vowels ("Pssh", "Shh") are spelled out by the
+  phonemiser, so `sentence_phonemes()` turns them into sounds.
 - Only `bm_lewis` survived Whisper checks across all 8 British voices; the
   British female voices garble short words. Re-check with Whisper before
   switching voice (`./say --check --no-play word ...`).

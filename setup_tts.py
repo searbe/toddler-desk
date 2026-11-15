@@ -4,7 +4,9 @@
 Usage: python3 setup_tts.py [--dev]
 
 Installs the `uv` package manager, a Python 3.12 venv with kokoro-onnx, and
-the Kokoro model. --dev also installs Whisper for `./say --check`.
+the Kokoro model, then makes a copy of the model that also reports how long
+each sound lasts (exact word timings for read-aloud). --dev also installs
+Whisper for `./say --check`.
 """
 
 import os
@@ -46,6 +48,28 @@ def setup():
         if not os.path.exists(path):
             print(f"downloading {f} ...")
             urllib.request.urlretrieve(MODEL_URL + f, path)
+    timed = os.path.join(MODEL_DIR, "kokoro-v1.0-timed.onnx")
+    if not os.path.exists(timed):
+        subprocess.run([uv, "pip", "install", "-q", "onnx"],
+                       env=dict(env, VIRTUAL_ENV=os.path.join(TTS, "venv")), check=True)
+        subprocess.run([VENV_PY, "-c", TIMED_MODEL_SCRIPT,
+                        os.path.join(MODEL_DIR, "kokoro-v1.0.onnx"), timed], check=True)
+
+
+# The model works out how many audio frames each sound lasts (the rounded
+# output of /encoder/Clip) but doesn't return it. Expose it as "duration";
+# kokoro-onnx then reports per-phoneme timings, and with its extra pauses
+# switched off the audio is identical to the original model's.
+TIMED_MODEL_SCRIPT = """
+import sys, onnx
+from onnx import helper, TensorProto
+m = onnx.load(sys.argv[1])
+m.graph.node.append(helper.make_node("Cast", ["/encoder/Clip_output_0"], ["duration"],
+                                     to=TensorProto.INT64, name="duration_out"))
+m.graph.output.append(helper.make_tensor_value_info("duration", TensorProto.INT64, None))
+onnx.save(m, sys.argv[2] + ".tmp")
+import os; os.replace(sys.argv[2] + ".tmp", sys.argv[2])
+"""
 
 
 def main():
