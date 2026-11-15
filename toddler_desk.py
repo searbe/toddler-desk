@@ -225,6 +225,8 @@ class Desk(Gtk.Widget):
         self.progress = 0.0
         # Until a picture word is being written, show the title's picture.
         self.icon = next(filter(None, map(icon_for, reversed(self.title.split()))), None)
+        if self.icon:
+            speech.prepare_word(self.icon[0])
 
     def _write_more(self):
         """Reveal the next letter (and any spaces before it)."""
@@ -240,8 +242,9 @@ class Desk(Gtk.Widget):
         start = self.text.rfind(" ") + 1
         end = self.story.find(" ", start)
         found = icon_for(self.story[start:end if end != -1 else None])
-        if found:
+        if found and found != self.icon:
             self.icon = found
+            speech.prepare_word(found[0])
         if self.text[-1].isalnum():
             self.letter = self.text[-1]
         if n >= len(self.story):
@@ -421,6 +424,7 @@ class ToddlerDesk(Gtk.Application):
         if not self.test_mode:
             lock_settings()
             self.inhibitor = start_power_inhibitor()
+            speech.start()
 
         win = Gtk.ApplicationWindow(application=self, title="Toddler Desk")
         self.win = win
@@ -535,6 +539,7 @@ class ToddlerDesk(Gtk.Application):
         return False
 
     def shutdown_cleanup(self):
+        speech.stop()
         if self.inhibitor and self.inhibitor.poll() is None:
             self.inhibitor.terminate()
         if not self.test_mode:

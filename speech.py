@@ -1,46 +1,57 @@
-"""Pre-recorded British English speech for letters and picture words.
+"""Speak letters and picture words via the live Kokoro voice (voice.py).
 
-Recordings live in sounds/letters/<char>.wav and sounds/words/<word>.wav and
-are made once by make_voices.py (Kokoro TTS, British voice). If a recording is
-missing, nothing is played.
+voice.py runs as a child process inside tts/venv so the app itself needs no
+extra Python packages. If the voice isn't set up, the app is simply silent.
 """
 
 import os
-import shutil
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SOUNDS = os.path.join(HERE, "sounds")
+VENV_PY = os.path.join(HERE, "tts", "venv", "bin", "python")
 
-# Digits are recorded from these words; letters from the capital letter itself
-# (which gives British names: "aitch", "zed").
-LETTER_NAMES = {
-    "a": "ay", "b": "bee", "c": "see", "d": "dee", "e": "ee", "f": "eff",
-    "g": "jee", "h": "aitch", "i": "eye", "j": "jay", "k": "kay", "l": "ell",
-    "m": "em", "n": "en", "o": "oh", "p": "pee", "q": "queue", "r": "ar",
-    "s": "ess", "t": "tee", "u": "you", "v": "vee", "w": "double you",
-    "x": "ex", "y": "why", "z": "zed",
-    "0": "nought", "1": "one", "2": "two", "3": "three", "4": "four",
-    "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
-}
-
-_player = shutil.which("pw-play") or shutil.which("paplay") or shutil.which("aplay")
-_current = None
+_proc = None
 
 
-def _play(path):
-    global _current
-    if not _player or not os.path.exists(path):
+def start():
+    """Start the voice in the background (loads the model, warms up letters)."""
+    global _proc
+    if _proc or not os.path.exists(VENV_PY):
         return
-    if _current and _current.poll() is None:
-        _current.terminate()  # one voice at a time, newest wins
-    _current = subprocess.Popen([_player, path], stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+    try:
+        _proc = subprocess.Popen([VENV_PY, os.path.join(HERE, "voice.py"), "--serve"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    except OSError:
+        _proc = None
+
+
+def _send(line):
+    global _proc
+    if not _proc or _proc.poll() is not None:
+        return
+    try:
+        _proc.stdin.write(line + "\n")
+        _proc.stdin.flush()
+    except (BrokenPipeError, OSError):
+        _proc = None
 
 
 def say_letter(ch):
-    _play(os.path.join(SOUNDS, "letters", ch.lower() + ".wav"))
+    _send(f"say letter {ch.lower()}")
 
 
 def say_word(word):
-    _play(os.path.join(SOUNDS, "words", word.lower() + ".wav"))
+    _send(f"say word {word.lower()}")
+
+
+def prepare_word(word):
+    """Make the clip ahead of time so a tap plays instantly."""
+    _send(f"prep word {word.lower()}")
+
+
+def stop():
+    global _proc
+    if _proc and _proc.poll() is None:
+        _proc.terminate()
+    _proc = None

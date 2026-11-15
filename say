@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Hear exactly what the app will say:  ./say banana   ./say -l h   ./say --check fish tractor
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec "$DIR/tts/venv/bin/python" "$DIR/voice.py" "$@"
