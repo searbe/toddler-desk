@@ -350,7 +350,8 @@ def _cut_before(tim, ti, r):
 
 
 def synth_sentence(text):
-    """(samples, rate, start of each word in seconds) for a sentence.
+    """(samples, rate, start of each word in seconds, whether there's a real
+    silent gap before each word to stop a clip at) for a sentence.
 
     Word starts come from the model's own durations when the timed model is
     there; otherwise they are estimated (see word_starts), which is only good
@@ -377,9 +378,22 @@ def synth_sentence(text):
                 cuts[0] = max(pauses[-1][0], pauses[-1][1] - int(0.03 * r))
             out = s[cuts[0]:]
             off = cuts[0] + _trim_start(out, r)
-            return (_trim(out, r), r, [round(max(0.0, (c - off) / r), 3) for c in cuts])
+            starts = [round(max(0.0, (c - off) / r), 3) for c in cuts]
+            return _trim(out, r), r, starts, [_is_gap(s, r, c) for c in cuts]
     s, r = synth("sentence", text)
-    return s, r, word_starts(text, s, r)
+    return s, r, word_starts(text, s, r), [False] * len(words)
+
+
+# A word boundary is "clean" if the cut point is in real silence. Measured:
+# real gaps 0.001-0.007, words that run together ("caught a", "in it")
+# 0.012-0.06. Stopping a clip at a boundary that isn't clean clips the last
+# word or leaks the next one (Whisper: "I caught" -> "I co").
+GAP_RMS = 0.01
+
+
+def _is_gap(s, r, i):
+    fr = int(r * 0.005)
+    return bool(np.sqrt(np.mean(s[i:i + fr] ** 2)) < GAP_RMS) if i + fr <= len(s) else True
 
 
 def _quietest_in(s, r, lo, hi):
@@ -442,7 +456,8 @@ def _fingerprint():
               for f in (phonemes, _trim, _trim_start, _speech, _quiet_gaps, _quiet_spans, synth,
                         word_starts, _is_sound, _sound_phonemes, sentence_phonemes, _create,
                         _word_phonemes, _align_words, synth_sentence, _quietest_in,
-                        _cut_before)]
+                        _cut_before, _is_gap)]
+    parts.append(str(GAP_RMS))
     parts.append(str(TIMING_SHIFT))
     parts.append(str(os.path.exists(TIMED_MODEL)))
     parts.append(repr(_SOUND) + repr(sorted(_NOT_SOUNDS)))  # sets print in random order
@@ -468,7 +483,8 @@ def clip(kind, text):
 
 
 def sentence_clip(text):
-    """(path, word start times) for a sentence; both kept in the cache."""
+    """(path, word start times, clean gap before each word) for a sentence;
+    all kept in the cache."""
     import hashlib
     import json
     name = hashlib.sha1(text.encode()).hexdigest()[:16]
@@ -476,28 +492,49 @@ def sentence_clip(text):
     meta = path[:-4] + ".json"
     if not (os.path.exists(path) and os.path.exists(meta)):
         os.makedirs(CACHE, exist_ok=True)
-        s, r, starts = synth_sentence(text)
+        s, r, starts, clean = synth_sentence(text)
         _made[0] += 1
         with open(meta + ".tmp", "w") as f:
-            json.dump(starts, f)
+            json.dump({"starts": starts, "clean": clean}, f)
         sf.write(path + ".tmp.wav", s, r)
         os.replace(meta + ".tmp", meta)
         os.replace(path + ".tmp.wav", path)
     with open(meta) as f:
-        return path, json.load(f)
+        m = json.load(f)
+    return path, m["starts"], m["clean"]
+
+
+END_FADE = 0.03
 
 
 def sentence_part(text, first, last):
     """Words first..last-1 of a sentence: (path to play, word starts, length).
 
-    Each stretch is its own clip, made from exactly those words. Cutting one
-    whole-sentence clip at word boundaries was tried and checked with Whisper:
-    even with the model's own timings it started on the wrong word ~1 time in
-    6, because words run into each other ("did it all", "caught a"). So "prep
-    sentence" makes a clip for every word position instead (see serve()).
+    Always instant: uses the clip made ahead from word `first` to the end of
+    the sentence ("prep sentence" makes one per word position; cutting a clip
+    to *start* mid-sentence was checked with Whisper and too often began on
+    the wrong word). If the sentence isn't all on screen yet, the clip stops
+    at the last real gap before the first unwritten word, so it never reads
+    past the screen but may leave off the last word or two (where words run
+    together a cut clips one or leaks the next). With no gap at all in the
+    stretch, it cuts at the boundary anyway.
     """
-    path, starts = sentence_clip(" ".join(text.split()[first:last]))
-    return path, starts, sf.info(path).duration
+    words = text.split()
+    path, starts, clean = sentence_clip(" ".join(words[first:]))
+    n = last - first
+    if n >= len(starts):
+        return path, starts, sf.info(path).duration
+    m = next((i for i in range(n, 0, -1) if clean[i]), n)
+    if m < n:
+        vlog(f"stopping before {words[first + m]!r}, not {words[last]!r}: no clean gap there")
+    s, r = sf.read(path, dtype="float32")
+    part = s[:int(starts[m] * r)].copy()
+    k = min(len(part), int(END_FADE * r))
+    part[len(part) - k:] *= np.linspace(1, 0, k, dtype=np.float32)
+    out = os.path.join(CACHE, "playing.wav")
+    sf.write(out + ".tmp.wav", part, r)
+    os.replace(out + ".tmp.wav", out)
+    return out, starts[:m], len(part) / r
 
 
 LETTERS = [("letter", c) for c in "abcdefghijklmnopqrstuvwxyz0123456789"]

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Toddler Desk: restore GNOME settings
+Comment=Puts back the shortcuts Toddler Desk switches off, in case it didn't exit cleanly (e.g. a hard power cycle). Does nothing otherwise.
+Exec=/usr/bin/python3 /home/craig/toddler-desk/toddler_desk.py --restore
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

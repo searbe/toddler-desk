@@ -53,6 +53,10 @@ work", not that the screen is fun.
   `--dev` adds Whisper for `./say --check`.
 - `asr_check.py` — Whisper transcription, used to check speech without ears.
 - `run.sh` / `~/.local/bin/toddler` — launcher; always restores settings after.
+- `autostart/toddler-desk-restore.desktop` — login item (copy in
+  `~/.config/autostart/`) that runs `--restore`, for after a hard power cycle.
+- `NOTES.md` — findings and evidence behind the rules here (speech tests,
+  GNOME gesture quirks, recovery, testing gotchas). Read it; add to it.
 
 ## Speech: known Kokoro pitfalls
 
@@ -79,8 +83,10 @@ work", not that the screen is fun.
   gets its own clip ("from this word to the end"), made while the sentence is
   being written and the one after (on the last sentence: the next report's
   first): one sentence ahead of the writing, never the whole report up front.
-  A tap in the sentence being written reads the whole sentence too (the report
-  is known), highlighting only what's on screen - so no tap waits for a clip.
+  A tap in the sentence being written must not read past the screen, and must
+  stay instant: the clip is stopped at the last real silent gap before the
+  first unwritten word (`clean` in the clip's .json), so the last word or two
+  on screen may be left off. The user chose instant over complete.
 - Sound words with no vowels ("Pssh", "Shh") are spelled out by the
   phonemiser, so `sentence_phonemes()` turns them into sounds.
 - Only `bm_lewis` survived Whisper checks across all 8 British voices; the

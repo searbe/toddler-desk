@@ -455,24 +455,23 @@ class Desk(Gtk.Widget):
         return a, b
 
     def read_from(self, x, y):
-        """Tap on a word: read from there to the end of its sentence.
-
-        The whole report is known, so a sentence still being written is read
-        to its end too, from the clip made ahead; words not on screen yet are
-        heard but have nothing to highlight (until they're typed).
-        """
+        """Tap on a word: read from there to the end of its sentence, or to the
+        last whole word on screen if the sentence is still being written. Both
+        play the clip made ahead (the voice stops it before unwritten words)."""
         word = self._word_at(x, y)
         if not word:
             return False
         sa, sb = next(sp for sp in self.sentences if sp[0] <= word[0] < sp[1])
         words = [(sa + m.start(), sa + m.end()) for m in re.finditer(r"\S+", self.story[sa:sb])]
+        n = len(self.text)
+        written = [w for w in words if w[1] <= n and (w[1] == len(self.story) or self.story[w[1]].isspace())]
         first = next(i for i, w in enumerate(words) if w[0] == word[0])
         self.read_id += 1
         log.info("tap word: read %d = %r", self.read_id,
-                 " ".join(self.story[a:b] for a, b in words[first:]))
-        self.reading = {"id": self.read_id, "ranges": words[first:], "asked": time.monotonic(),
+                 " ".join(self.story[a:b] for a, b in written[first:]))
+        self.reading = {"id": self.read_id, "ranges": written[first:], "asked": time.monotonic(),
                         "starts": None, "t0": 0.0, "end": 0.0}
-        speech.read(self.read_id, first, len(words), self.story[sa:sb])
+        speech.read(self.read_id, first, len(written), self.story[sa:sb])
         return True
 
     def on_voice(self, line):
@@ -948,12 +947,25 @@ class ToddlerDesk(Gtk.Application):
                 pass
 
 
+USAGE = """usage: toddler_desk.py [--test | --quit | --restore]
+  (no option)  run full screen and lock GNOME shortcuts until the secret exit
+  --test       900x600 window for 3 s, changes no settings
+  --quit       ask a running Toddler Desk to exit
+  --restore    put back GNOME settings after a crash or power cut"""
+
+
 def main():
+    args = sys.argv[1:]
+    if args not in ([], ["--test"], ["--quit"], ["--restore"]):
+        # Never fall through to the full-screen lockdown on a typo or --help.
+        print(USAGE, file=sys.stderr)
+        return 0 if args in (["--help"], ["-h"]) else 2
     if "--quit" in sys.argv:
         return 0 if quit_running() else 1
     if "--restore" in sys.argv:
+        had_backup = os.path.exists(BACKUP_FILE)
         restore_settings()
-        print("GNOME settings restored.")
+        print("GNOME settings restored." if had_backup else "Nothing to restore.")
         return 0
     setup_logging("--test" in sys.argv)
     app = ToddlerDesk(test_mode="--test" in sys.argv)
