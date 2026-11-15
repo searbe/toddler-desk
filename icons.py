@@ -5,81 +5,67 @@ automatically ("ducks" -> "duck", "fishes" -> "fish"), so only add singulars
 unless the plural is irregular (teeth, sheep, ...).
 """
 
+# Rule: a word only gets a picture if the emoji actually shows that thing, as
+# the word is used in the reports. No "near enough" (a spanner for "jack", a
+# balloon for "pump"), and no words the reports also use in another sense
+# ("saw" = I saw, "tap tap tap", "cup of tea", turtle "shell", alphabet
+# "letters"). Before adding one, check its Unicode name and how the word is
+# used in reports/. No picture is fine: the last picture stays up.
 ICONS = {
     # vehicles
     "tractor": "🚜", "helicopter": "🚁", "train": "🚂", "car": "🚗", "bus": "🚌",
-    "ambulance": "🚑", "police": "🚓", "rocket": "🚀", "boat": "⛵", "ship": "🚢",
-    "ferry": "⛴️", "aeroplane": "✈️", "bike": "🚲", "lorry": "🚚", "tanker": "🚚",
-    "digger": "🚜", "excavator": "🏗️", "crane": "🏗️", "bulldozer": "🚜",
-    "fire": "🔥", "engine": "🚒", "racing": "🏎️", "submarine": "🌊",
-    "carriage": "🚃", "tugboat": "🚤", "float": "🥛", "wheel": "🛞", "tyre": "🛞",
-    "petrol": "⛽", "trailer": "🚚", "forklift": "📦", "plough": "🚜", "mixer": "🏗️",
-    "harvester": "🌾", "track": "🛤️", "runway": "✈️", "pilot": "✈️", "siren": "🚨",
-    "lights": "🚨",
+    "ambulance": "🚑", "rocket": "🚀", "boat": "⛵", "ship": "🚢", "ferry": "⛴️",
+    "aeroplane": "✈️", "bike": "🚲", "lorry": "🚚", "crane": "🏗️", "fire": "🔥",
+    "racing": "🏎️", "carriage": "🚃", "wheel": "🛞", "tyre": "🛞", "petrol": "⛽",
+    "track": "🛤️", "siren": "🚨",
     # sea and water creatures
     "fish": "🐟", "whale": "🐋", "octopus": "🐙", "crab": "🦀", "shark": "🦈",
-    "dolphin": "🐬", "turtle": "🐢", "penguin": "🐧", "starfish": "⭐",
-    "jellyfish": "🪼", "lobster": "🦞", "squid": "🦑", "seal": "🦭", "shrimp": "🦐",
-    "tadpole": "🐸", "frog": "🐸", "snail": "🐌", "shell": "🐚", "seaweed": "🌿",
-    "sea": "🌊", "water": "💧", "wave": "🌊", "pond": "🦆", "pool": "🌊",
-    "bubble": "🫧", "goldfish": "🐠", "net": "🎣", "fisherman": "🎣",
-    "seaside": "🏖️", "beach": "🏖️", "aquarium": "🐠",
+    "dolphin": "🐬", "turtle": "🐢", "penguin": "🐧", "jellyfish": "🪼",
+    "lobster": "🦞", "squid": "🦑", "seal": "🦭", "shrimp": "🦐", "frog": "🐸",
+    "snail": "🐌", "sea": "🌊", "water": "💧", "bubble": "🫧", "seaside": "🏖️",
+    "beach": "🏖️",
     # animals
-    "duck": "🦆", "bird": "🐦", "seagull": "🐦", "puppy": "🐶", "dog": "🐕",
-    "cat": "🐈", "bear": "🐻", "teddy": "🧸", "hamster": "🐹", "horse": "🐴",
-    "cow": "🐄", "pig": "🐖", "chicken": "🐔", "sheep": "🐑", "dinosaur": "🦕",
-    "dragon": "🐉", "bunny": "🐰", "worm": "🪱", "crocodile": "🐊", "owl": "🦉",
-    "rabbit": "🐰", "bee": "🐝", "butterfly": "🦋", "spider": "🕷️", "mouse": "🐭",
-    "patient": "🧸", "farm": "🐄", "farmer": "🧑‍🌾", "paw": "🐾",
-    # doctor things
-    "doctor": "🩺", "nurse": "🩺", "hospital": "🏥", "medicine": "💊",
-    "plaster": "🩹", "bandage": "🩹", "thermometer": "🌡️", "tooth": "🦷",
-    "teeth": "🦷", "dentist": "🦷", "glasses": "👓", "eye": "👁️", "ear": "👂",
-    "heart": "❤️", "knee": "🦵", "leg": "🦵", "arm": "💪", "tummy": "🤒",
-    "cough": "🤧", "sniffle": "🤧", "tissue": "🤧", "sneezed": "🤧",
-    "sticker": "⭐", "spoon": "🥄", "torch": "🔦",
+    "duck": "🦆", "bird": "🐦", "puppy": "🐶", "dog": "🐕", "cat": "🐈", "bear": "🐻",
+    "teddy": "🧸", "hamster": "🐹", "horse": "🐴", "cow": "🐄", "pig": "🐖",
+    "chicken": "🐔", "sheep": "🐑", "dinosaur": "🦕", "dragon": "🐉", "bunny": "🐰",
+    "worm": "🪱", "crocodile": "🐊", "owl": "🦉", "rabbit": "🐰", "bee": "🐝",
+    "butterfly": "🦋", "spider": "🕷️", "paw": "🐾", "nest": "🪺",
+    # people
+    "doctor": "🧑‍⚕️", "nurse": "🧑‍⚕️", "police": "👮", "pilot": "🧑‍✈️",
+    "firefighter": "🧑‍🚒", "mechanic": "🧑‍🔧", "builder": "👷", "farmer": "🧑‍🌾",
+    "baby": "👶", "grandma": "👵", "daddy": "👨", "mummy": "👩",
+    # doctor things and the body
+    "hospital": "🏥", "medicine": "💊", "plaster": "🩹", "thermometer": "🌡️",
+    "tooth": "🦷", "teeth": "🦷", "glasses": "👓", "eye": "👁️", "ear": "👂",
+    "heart": "❤️", "leg": "🦵", "sneezed": "🤧", "spoon": "🥄", "torch": "🔦",
     # tools and fixing
-    "spanner": "🔧", "hammer": "🔨", "screwdriver": "🪛", "nail": "🔩",
-    "bolt": "🔩", "screw": "🔩", "ladder": "🪜", "oil": "🛢️", "hose": "🧯",
-    "pump": "🎈", "brick": "🧱", "block": "🧱", "rope": "🪢", "knot": "🪢",
-    "needle": "🪡", "thread": "🧵", "battery": "🔋", "bulb": "💡", "light": "💡",
-    "plug": "🔌", "wire": "🔌", "jack": "🔧", "plunger": "🪠", "cone": "🚧",
-    "hat": "⛑️", "bucket": "🪣", "chain": "⛓️", "key": "🔑", "magnet": "🧲",
-    "saw": "🪚", "level": "📏", "sponge": "🧽", "soap": "🧼", "squeegee": "🧽",
-    "fence": "🚧", "gate": "🚧", "hole": "🕳️",
+    "spanner": "🔧", "hammer": "🔨", "screwdriver": "🪛", "bolt": "🔩",
+    "ladder": "🪜", "oil": "🛢️", "brick": "🧱", "knot": "🪢", "needle": "🪡",
+    "thread": "🧵", "battery": "🔋", "bulb": "💡", "light": "💡", "plug": "🔌",
+    "plunger": "🪠", "chain": "⛓️", "key": "🔑", "magnet": "🧲", "sponge": "🧽",
+    "soap": "🧼", "hole": "🕳️",
     # house and things
-    "house": "🏠", "door": "🚪", "window": "🪟", "roof": "🏠", "bath": "🛁",
-    "tap": "🚰", "sink": "🚰", "clock": "🕰️", "radio": "📻", "computer": "💻",
-    "toaster": "🍞", "washing": "🧺", "sock": "🧦", "hoover": "🧹", "shelf": "📚",
-    "book": "📚", "bed": "🛏️", "blanket": "🛏️", "swing": "🛝", "tower": "🗼",
-    "lighthouse": "🗼", "barn": "🛖", "garage": "🔧", "bin": "🗑️", "box": "📦",
-    "parcel": "📦", "letter": "✉️", "bag": "👜", "postman": "📮", "bell": "🔔",
-    "whistle": "📯", "cup": "🏆", "tent": "⛺", "nest": "🪺", "lego": "🧱",
-    "doll": "🪆", "baby": "👶", "bottle": "🍼", "grandma": "👵", "daddy": "👨",
-    "mummy": "👩", "milkman": "🥛", "builder": "👷", "firefighter": "🧑‍🚒",
-    "mechanic": "🔧", "plumber": "🔧", "captain": "⚓", "driver": "🧢",
-    "shop": "🏪", "road": "🛣️", "street": "🛣️", "rubbish": "🗑️", "recycling": "♻️",
-    "planet": "🌍", "step": "🪜",
+    "house": "🏠", "door": "🚪", "window": "🪟", "bath": "🛁", "clock": "🕰️",
+    "radio": "📻", "computer": "💻", "sock": "🧦", "book": "📚", "bed": "🛏️",
+    "bin": "🗑️", "box": "📦", "parcel": "📦", "bell": "🔔", "tent": "⛺",
+    "shop": "🏪", "road": "🛣️", "recycling": "♻️", "music": "🎵",
     # food
-    "egg": "🥚", "cake": "🍰", "tea": "☕", "toast": "🍞", "butter": "🧈",
-    "carrot": "🥕", "banana": "🍌", "milk": "🥛", "cereal": "🥣", "biscuit": "🍪",
-    "sweetie": "🍬", "spaghetti": "🍝", "seed": "🌱", "bean": "🫘", "wheat": "🌾",
-    "grain": "🌾", "hay": "🌾", "straw": "🌾", "apple": "🍎", "sandwich": "🥪",
-    "lunch": "🍽️", "breakfast": "🥣", "snack": "🍎", "food": "🍽️", "sunflower": "🌻",
+    "egg": "🥚", "cake": "🍰", "tea": "☕", "butter": "🧈", "carrot": "🥕",
+    "banana": "🍌", "milk": "🥛", "cereal": "🥣", "biscuit": "🍪", "sweetie": "🍬",
+    "spaghetti": "🍝", "bean": "🫘", "wheat": "🌾", "grain": "🌾", "apple": "🍎",
+    "sandwich": "🥪", "sunflower": "🌻",
     # weather, sky, nature
-    "moon": "🌙", "earth": "🌍", "sun": "☀️", "star": "⭐", "cloud": "☁️",
-    "rain": "🌧️", "snow": "❄️", "snowman": "⛄", "smoke": "💨", "tree": "🌳",
-    "flower": "🌸", "garden": "🌻", "mud": "🟫", "puddle": "💧", "rock": "🪨",
-    "stone": "🪨", "dirt": "🟫", "sand": "🏖️", "hill": "⛰️", "field": "🌾",
-    "night": "🌙", "space": "🚀", "coal": "🪨", "cement": "🧱",
-    # misc
-    "music": "🎵", "sleep": "😴", "hug": "🤗", "cuddle": "🤗", "crash": "💥",
+    "moon": "🌙", "earth": "🌍", "planet": "🌍", "sun": "☀️", "star": "⭐",
+    "cloud": "☁️", "rain": "🌧️", "snow": "❄️", "snowman": "⛄", "tree": "🌳",
+    "flower": "🌸", "rock": "🪨", "stone": "🪨",
+    # feelings and happenings
+    "sleep": "😴", "hug": "🤗", "cuddle": "🤗", "crash": "💥",
 }
 
 IRREGULAR = {"teeth": "tooth", "mice": "mouse", "geese": "goose", "children": "child",
              "people": "people", "feet": "foot", "boxes": "box", "fishes": "fish",
              "wheels": "wheel", "sweeties": "sweetie", "puppies": "puppy",
-             "babies": "baby", "carriages": "carriage", "lorries": "lorry"}
+             "babies": "baby", "teddies": "teddy", "carriages": "carriage", "lorries": "lorry"}
 
 
 def icon_for(word):

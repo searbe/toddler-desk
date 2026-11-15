@@ -4,7 +4,10 @@ A deliberately calm, unexciting full-screen "work" app for a toddler (GNOME on
 Wayland, Python + GTK4). Keys and taps write out a pretend report; a greyscale
 picture of the word being written (word printed underneath) and the latest
 letter ("Hh") sit to the right.
-Tapping the picture or the letter speaks it. Exit: Ctrl+Alt+Shift+P+I.
+Tapping the picture or the letter speaks it. Exit: Ctrl+Alt+Shift+P+I (a GNOME
+shortcut for Ctrl+Alt+Shift+I backs it up if the window loses focus; or
+`toddler_desk.py --quit` / SIGTERM). Second exit: tap Esc 8 times, then press
+the two random letters shown top-right together.
 
 ## UK English only — no Americanisms
 
@@ -53,6 +56,11 @@ beyond a progress bar and faint tap ripples. The goal is that he feels he is
   British letter name.
 - A word said on its own gets junk at the start ("t-banana", "an-a"). `synth()`
   says a lead-in phrase first and cuts at the pause; keep that.
+- Making a clip takes ~1.5 s, so clips are cached on disk in
+  `~/.cache/toddler-desk/voice/<fingerprint>/`. Only letters/digits are made
+  in the background; the app asks for each picture word one word ahead (`prep`).
+  Don't add an up-front fill of every word. The fingerprint hashes `synth()` and the voice settings,
+  so edits invalidate the cache automatically — no manual clearing.
 - Only `bm_lewis` survived Whisper checks across all 8 British voices; the
   British female voices garble short words. Re-check with Whisper before
   switching voice (`./say --check --no-play word ...`).

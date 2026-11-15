@@ -5,6 +5,11 @@ Keys type into a pretend report; a progress bar fills and the report gets
 "saved". Clicks leave a faint ripple. Nothing flashy, no sounds.
 
 Exit:  hold Ctrl + Alt + Shift, then press P and I (together, or P then I).
+       Either Alt works (incl. AltGr). If the window has lost keyboard focus,
+       a GNOME shortcut for Ctrl+Alt+Shift+I quits it instead. From another
+       machine: `toddler_desk.py --quit` (or kill it; it restores on SIGTERM).
+Exit 2: tap Esc 8 times; a line top-right asks for two random letters pressed together.
+       Any other key, letting go early, a tap, or 15 s hides it again.
 
 While running it:
   * inhibits GNOME system shortcuts (GNOME asks you to "Allow" once),
@@ -18,6 +23,7 @@ and puts every setting back on exit. If it ever dies uncleanly, run
 import json
 import os
 import random
+import signal
 import subprocess
 import sys
 import time
@@ -30,6 +36,14 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
+try:
+    gi.require_version("GLibUnix", "2.0")
+    from gi.repository import GLibUnix  # noqa: E402
+
+    _signal_add = GLibUnix.signal_add
+except (ImportError, ValueError):
+    _signal_add = GLib.unix_signal_add
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import speech  # noqa: E402
 from icons import icon_for  # noqa: E402
@@ -39,6 +53,14 @@ STATE_DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "toddler-desk"
 )
 BACKUP_FILE = os.path.join(STATE_DIR, "settings-backup.json")
+PID_FILE = os.path.join(STATE_DIR, "pid")
+
+# A GNOME shortcut that quits the app even when its window has lost keyboard
+# focus (then the app's own key handler never sees the exit combo). While the
+# app has focus, system shortcuts are inhibited and the app handles it itself.
+MEDIA_KEYS = "org.gnome.settings-daemon.plugins.media-keys"
+EXIT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/toddler-desk-exit/"
+EXIT_BINDING = "<Control><Alt><Shift>i"
 
 # ---------------------------------------------------------------- settings lock
 
@@ -76,7 +98,8 @@ def _planned_changes():
             continue
         for key in schema.list_keys():
             if schema.get_key(key).get_value_type().dup_string() == "as":
-                yield schema_id, key, GLib.Variant("as", [])
+                keep = [EXIT_PATH] if (schema_id, key) == (MEDIA_KEYS, "custom-keybindings") else []
+                yield schema_id, key, GLib.Variant("as", keep)
     for schema_id, key, value in SINGLE_KEYS:
         if _schema_exists(schema_id):
             schema = src.lookup(schema_id, True)
@@ -101,9 +124,23 @@ def lock_settings():
     with open(tmp, "w") as f:
         json.dump(backup, f)
     os.replace(tmp, BACKUP_FILE)
+    _set_exit_shortcut(True)
     for schema_id, key, value in changes:
         settings_cache[schema_id].set_value(key, value)
     Gio.Settings.sync()
+
+
+def _set_exit_shortcut(on):
+    if not _schema_exists(MEDIA_KEYS + ".custom-keybinding"):
+        return
+    s = Gio.Settings.new_with_path(MEDIA_KEYS + ".custom-keybinding", EXIT_PATH)
+    if on:
+        s.set_string("name", "Quit Toddler Desk")
+        s.set_string("command", f"{sys.executable} {os.path.abspath(__file__)} --quit")
+        s.set_string("binding", EXIT_BINDING)
+    else:
+        for key in ("name", "command", "binding"):
+            s.reset(key)
 
 
 def restore_settings():
@@ -118,8 +155,23 @@ def restore_settings():
             s.set_value(key, GLib.Variant.parse(GLib.VariantType.new(type_str), text, None, None))
         except Exception as e:  # keep going; restore as much as possible
             print(f"restore failed for {schema_id} {key}: {e}", file=sys.stderr)
+    _set_exit_shortcut(False)
     Gio.Settings.sync()
     os.remove(BACKUP_FILE)
+
+
+def quit_running():
+    """Ask a running Toddler Desk to exit (it restores settings itself)."""
+    try:
+        with open(PID_FILE) as f:
+            pid = int(f.read())
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"toddler_desk.py" not in f.read():
+                return False
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def start_power_inhibitor():
@@ -215,6 +267,7 @@ class Desk(Gtk.Widget):
         self.last_input = 0.0
         self.letter = ""  # most recent letter, shown as "Hh"
         self.icon_rect = self.letter_rect = None
+        self.prompt = None  # (X, Y) while the "close?" line is showing
         GLib.timeout_add(50, self.tick)
 
     def _next_report(self):
@@ -227,6 +280,16 @@ class Desk(Gtk.Widget):
         self.icon = next(filter(None, map(icon_for, reversed(self.title.split()))), None)
         if self.icon:
             speech.prepare_word(self.icon[0])
+        self._prepare_next_icon(0)
+
+    def _prepare_next_icon(self, pos):
+        """Make the clip for the next picture word after `pos` before it shows up,
+        so tapping it plays straight away instead of waiting ~1.5 s."""
+        for word in self.story[pos:].split():
+            found = icon_for(word)
+            if found and found != self.icon:
+                speech.prepare_word(found[0])
+                return
 
     def _write_more(self):
         """Reveal the next letter (and any spaces before it)."""
@@ -244,7 +307,8 @@ class Desk(Gtk.Widget):
         found = icon_for(self.story[start:end if end != -1 else None])
         if found and found != self.icon:
             self.icon = found
-            speech.prepare_word(found[0])
+            speech.prepare_word(found[0])  # normally made already, see below
+            self._prepare_next_icon(end if end != -1 else len(self.story))
         if self.text[-1].isalnum():
             self.letter = self.text[-1]
         if n >= len(self.story):
@@ -407,6 +471,20 @@ class Desk(Gtk.Widget):
             c = _rgba((0.8, 0.8, 0.8), 0.35 * (1 - t))
             snap.append_border(rr, [2, 2, 2, 2], [c, c, c, c])
 
+        if self.prompt:
+            self._draw_prompt(snap, w, h)
+
+    def _draw_prompt(self, snap, w, h):
+        """A quiet line of text in the top-right corner."""
+        x, y = self.prompt
+        lay = self.create_pango_layout(f"If you want to close, press {x} and {y} together.")
+        lay.set_font_description(Pango.FontDescription.from_string(f"Sans {max(10, int(h / 60))}"))
+        _, ext = lay.get_pixel_extents()
+        snap.save()
+        snap.translate(Graphene.Point().init(w * 0.98 - ext.width - ext.x, h * 0.02 - ext.y))
+        snap.append_layout(lay, _rgba(DIM))
+        snap.restore()
+
 
 # ------------------------------------------------------------------- app shell
 
@@ -417,11 +495,20 @@ class ToddlerDesk(Gtk.Application):
         self.allow_quit = False
         self.held = set()
         self.p_pressed_at = 0.0
+        self.esc_count = 0
+        self.esc_at = 0.0
+        self.prompt_down = set()
+        self.prompt_timer = 0
         self.inhibitor = None
         self.connect("activate", self.on_activate)
 
     def on_activate(self, _app):
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            _signal_add(GLib.PRIORITY_HIGH, sig, self.quit_for_real)
         if not self.test_mode:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(PID_FILE, "w") as f:
+                f.write(str(os.getpid()))
             lock_settings()
             self.inhibitor = start_power_inhibitor()
             speech.start()
@@ -441,7 +528,7 @@ class ToddlerDesk(Gtk.Application):
 
         click = Gtk.GestureClick()
         click.set_button(0)
-        click.connect("pressed", lambda _g, _n, x, y: self.desk.click(x, y))
+        click.connect("pressed", self.on_click)
         win.add_controller(click)
 
         win.connect("close-request", lambda _w: not self.allow_quit)
@@ -514,25 +601,96 @@ class ToddlerDesk(Gtk.Application):
         return False
 
     # -- the secret exit -----------------------------------------------------
-    def on_key_pressed(self, _ctrl, keyval, _keycode, state):
-        k = Gdk.keyval_to_lower(keyval)
-        self.held.add(k)
+    ALT_KEYS = {Gdk.KEY_Alt_L, Gdk.KEY_Alt_R, Gdk.KEY_ISO_Level3_Shift, Gdk.KEY_Meta_L, Gdk.KEY_Meta_R}
+
+    def _base_key(self, keyval, keycode):
+        """The key's plain (unshifted) letter, so AltGr/Shift levels don't matter."""
+        ok, base, *_ = Gdk.Display.get_default().translate_key(keycode, 0, 0)
+        return Gdk.keyval_to_lower(base if ok else keyval)
+
+    def on_click(self, _gesture, _n, x, y):
+        if self.desk.prompt:
+            self._dismiss_prompt()
+        else:
+            self.desk.click(x, y)
+
+    def on_key_pressed(self, _ctrl, keyval, keycode, state):
+        repeat = keyval in self.held  # auto-repeat from a key held down
+        self.held.add(keyval)
+        k = self._base_key(keyval, keycode)
+
+        if self.desk.prompt:
+            self._prompt_key(k, repeat)
+            return True
+
         mods = Gdk.ModifierType
-        need = mods.CONTROL_MASK | mods.ALT_MASK | mods.SHIFT_MASK
-        if (state & need) == need:
+        alt = bool(state & mods.ALT_MASK) or bool(self.held & self.ALT_KEYS)  # left Alt or AltGr
+        if alt and state & mods.CONTROL_MASK and state & mods.SHIFT_MASK:
             now = time.monotonic()
             if k == Gdk.KEY_p:
                 self.p_pressed_at = now
-            if k == Gdk.KEY_i and (Gdk.KEY_p in self.held or now - self.p_pressed_at < 1.5):
+            if k == Gdk.KEY_i and now - self.p_pressed_at < 3:
                 self.quit_for_real()
                 return True
+
+        if not repeat and self._count_esc(keyval):
+            return True
         self.desk.key(keyval)
         return True  # swallow everything
 
-    def on_key_released(self, _ctrl, keyval, _keycode, _state):
-        self.held.discard(Gdk.keyval_to_lower(keyval))
+    def on_key_released(self, _ctrl, keyval, keycode, _state):
+        self.held.discard(keyval)
+        if self.desk.prompt and self._base_key(keyval, keycode) in self.prompt_down:
+            self._dismiss_prompt()  # let go before both were down
+
+    # -- the second exit: Esc x8, then a random pair of letters ---------------
+    ESC_TAPS = 8
+
+    def _count_esc(self, keyval):
+        """Count separate Esc taps in a row; True once the prompt opens."""
+        if keyval != Gdk.KEY_Escape:
+            name = Gdk.keyval_name(keyval) or ""
+            if not name.endswith(("_L", "_R")):
+                self.esc_count = 0
+            return False
+        now = time.monotonic()
+        self.esc_count = self.esc_count + 1 if now - self.esc_at < 1.5 else 1
+        self.esc_at = now
+        if self.esc_count < self.ESC_TAPS:
+            return False
+        self.esc_count = 0
+        a, b = random.sample("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 2)
+        self.desk.prompt = (a, b)
+        self.prompt_down = set()
+        self.prompt_timer = GLib.timeout_add_seconds(15, self._prompt_timed_out)
+        self.desk.queue_draw()
+        return True
+
+    def _prompt_key(self, k, repeat):
+        pair = {Gdk.unicode_to_keyval(ord(c.lower())) for c in self.desk.prompt}
+        if k in pair:
+            self.prompt_down.add(k)
+            if self.prompt_down == pair:
+                self.quit_for_real()
+        elif not repeat:
+            self._dismiss_prompt()  # any other key: not a grown-up
+
+    def _prompt_timed_out(self):
+        self.prompt_timer = 0  # this source ends itself by returning False
+        return self._dismiss_prompt()
+
+    def _dismiss_prompt(self):
+        if self.prompt_timer:
+            GLib.source_remove(self.prompt_timer)
+            self.prompt_timer = 0
+        self.desk.prompt = None
+        self.prompt_down = set()
+        self.desk.queue_draw()
+        return False
 
     def quit_for_real(self):
+        if self.allow_quit:
+            return False
         self.allow_quit = True
         self.shutdown_cleanup()
         self.quit()
@@ -544,9 +702,15 @@ class ToddlerDesk(Gtk.Application):
             self.inhibitor.terminate()
         if not self.test_mode:
             restore_settings()
+            try:
+                os.remove(PID_FILE)
+            except OSError:
+                pass
 
 
 def main():
+    if "--quit" in sys.argv:
+        return 0 if quit_running() else 1
     if "--restore" in sys.argv:
         restore_settings()
         print("GNOME settings restored.")

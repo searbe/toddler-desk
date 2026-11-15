@@ -5,17 +5,21 @@ As a server (started by the app):  voice.py --serve
     reads lines from stdin:  "say word banana" | "say letter h" | "prep word banana"
 For testing by hand:                ./say banana   |   ./say -l h   |   ./say --check [--no-play] fish
 
-All the decisions about *how* things are said live in synth() below, so a fix
-can be tried with ./say straight away - no re-recording.
+All the decisions about *how* things are said live in synth() below. Clips are
+cached in ~/.cache/toddler-desk/voice/<fingerprint>/, where the fingerprint
+covers synth() and the voice settings - so after editing synth(), ./say makes
+fresh clips straight away.
+
+Clips are made on demand. Only letters and digits (36 clips, under a minute)
+are made in the background, because any key can be tapped next; picture words
+are asked for one word ahead by the app ("prep"), so they're ready in time.
 """
 
-import atexit
 import os
 import queue
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 
 import numpy as np
@@ -113,22 +117,39 @@ def synth(kind, text):
     return _trim(s[cut:], r), r
 
 
-# ---------------------------------------------------------------- playback
+# ------------------------------------------------------------ cache & playback
+#
+# Making a clip takes ~1.5 s, far too slow for a tap. So every clip is kept on
+# disk; letters are made in the background, words just before they're needed.
+# The cache folder is named after a fingerprint of the voice settings and the
+# synth code itself, so editing synth() automatically starts a fresh cache.
 
-_cache = {}
+def _fingerprint():
+    import hashlib
+    import inspect
+    parts = [VOICE, str(SPEED), LEAD, repr(DIGITS)]
+    parts += [inspect.getsource(f) for f in (phonemes, _trim, _speech, _quiet_gaps, synth)]
+    return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:12]
+
+
+CACHE_ROOT = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+                          "toddler-desk", "voice")
+CACHE = os.path.join(CACHE_ROOT, _fingerprint())
 _player = None
-_tmp = tempfile.mkdtemp(prefix="toddler-voice-")
-atexit.register(shutil.rmtree, _tmp, ignore_errors=True)
 
 
 def clip(kind, text):
-    key = (kind, text.lower())
-    if key not in _cache:
-        s, r = synth(kind, text.lower())
-        path = os.path.join(_tmp, f"{kind}-{len(_cache)}.wav")
-        sf.write(path, s, r)
-        _cache[key] = path
-    return _cache[key]
+    text = "".join(c for c in text.lower() if c.isalnum())
+    path = os.path.join(CACHE, f"{kind}-{text}.wav")
+    if not os.path.exists(path):
+        os.makedirs(CACHE, exist_ok=True)
+        s, r = synth(kind, text)
+        sf.write(path + ".tmp.wav", s, r)
+        os.replace(path + ".tmp.wav", path)
+    return path
+
+
+LETTERS = [("letter", c) for c in "abcdefghijklmnopqrstuvwxyz0123456789"]
 
 
 def play(path):
@@ -140,7 +161,13 @@ def play(path):
 
 
 def serve():
-    """Answer requests at once; pre-make letter clips only while idle."""
+    """Answer requests at once; make letter clips in the background while idle."""
+    os.nice(5)  # never make the screen stutter
+    # Old caches belong to earlier versions of synth(): remove them.
+    if os.path.isdir(CACHE_ROOT):
+        for d in os.listdir(CACHE_ROOT):
+            if d != os.path.basename(CACHE):
+                shutil.rmtree(os.path.join(CACHE_ROOT, d), ignore_errors=True)
     requests = queue.Queue()
 
     def reader():
@@ -149,14 +176,16 @@ def serve():
         requests.put(None)  # stdin closed: the app has gone
 
     threading.Thread(target=reader, daemon=True).start()
-    warmup = [("letter", ch) for ch in "abcdefghijklmnopqrstuvwxyz0123456789"]
-    kokoro()
+    todo = [item for item in LETTERS
+            if not os.path.exists(os.path.join(CACHE, f"{item[0]}-{item[1]}.wav"))]
+    if todo:
+        kokoro()
     print("ready", flush=True)
     while True:
         try:
-            line = requests.get(timeout=0 if warmup else None)
+            line = requests.get(timeout=0 if todo else None)
         except queue.Empty:
-            clip(*warmup.pop(0))
+            clip(*todo.pop(0))
             continue
         if line is None:
             break
